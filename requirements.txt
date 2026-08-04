@@ -1,0 +1,7 @@
+streamlit
+pandas
+pdfplumber
+fastcoref
+transformers==4.46.0
+requests
+beautifulsoup4
