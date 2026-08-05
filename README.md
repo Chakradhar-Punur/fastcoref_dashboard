@@ -33,7 +33,7 @@ Opens at `http://localhost:8501`. On macOS with Safari, use `http://127.0.0.1:85
 ## Project structure
 
 ```
-app.py                      # Streamlit UI — navigation, all four sections
+app.py                       # Streamlit UI — navigation, all four sections
 utils/
   constants.py               # Shared constants (status options, sentinels)
   clusters.py                # Group mentions into clusters, derive labels
