@@ -33,6 +33,27 @@ def compute_gold_score(gold_mentions: list, clusters: list):
     }
 
 
+def aggregate_pairwise_prf(prf_results: list):
+    """Pool several compute_pairwise_prf() results (one per document) into a single
+    micro-averaged score, rather than just averaging their precision/recall ratios —
+    a document with few clusters shouldn't count as much as one with many."""
+    total_overlap = sum(r["num_overlap_pairs"] for r in prf_results)
+    total_original = sum(r["num_original_pairs"] for r in prf_results)
+    total_corrected = sum(r["num_corrected_pairs"] for r in prf_results)
+    total_removed = sum(r["num_removed_mentions"] for r in prf_results)
+
+    precision = total_overlap / total_original if total_original else 1.0
+    recall = total_overlap / total_corrected if total_corrected else 1.0
+    f1 = (2 * precision * recall / (precision + recall)) if (precision + recall) > 0 else 0.0
+
+    return {
+        "precision": precision,
+        "recall": recall,
+        "f1": f1,
+        "num_removed_mentions": total_removed,
+    }
+
+
 def compute_pairwise_prf(original_mentions: list, corrected_mentions: list):
     """
     Score the original model output against the reviewer-corrected clusters,
@@ -70,4 +91,9 @@ def compute_pairwise_prf(original_mentions: list, corrected_mentions: list):
         "recall": recall,
         "f1": f1,
         "num_removed_mentions": len(original_mentions) - len(corrected_mentions),
+        # Raw counts, so scores from multiple documents can be pooled into one
+        # proper (micro-averaged) score instead of just averaging ratios.
+        "num_overlap_pairs": len(overlap),
+        "num_original_pairs": len(original_pairs),
+        "num_corrected_pairs": len(corrected_pairs),
     }

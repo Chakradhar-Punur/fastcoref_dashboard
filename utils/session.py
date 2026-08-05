@@ -88,4 +88,5 @@ def load_session(snapshot: dict):
     st.session_state.documents = documents
     st.session_state.current_doc_id = documents[0]["id"] if documents else None
     st.session_state.current_cluster_id = None
+    st.session_state.next_new_doc_id = max((d["id"] for d in documents), default=-1) + 1
     clear_status_widget_keys()

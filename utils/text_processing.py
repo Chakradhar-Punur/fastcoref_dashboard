@@ -2,6 +2,7 @@ import io
 import re
 from collections import Counter
 
+import pandas as pd
 import pdfplumber
 import requests
 from bs4 import BeautifulSoup
@@ -85,6 +86,29 @@ def extract_documents_from_url(url: str, timeout: int = 15) -> list:
         })
 
     return documents
+
+
+def load_csv(uploaded_file) -> pd.DataFrame:
+    return pd.read_csv(uploaded_file)
+
+
+def guess_csv_columns(df: pd.DataFrame):
+    """Best-effort guess of (title_col, text_col) from common column names."""
+    cols_lower = {c.lower(): c for c in df.columns}
+    title_col = next((cols_lower[c] for c in ("title", "headline", "name") if c in cols_lower), None)
+    text_col = next(
+        (cols_lower[c] for c in ("abstract", "text", "body", "content", "summary") if c in cols_lower),
+        None,
+    )
+    return title_col, text_col
+
+
+def csv_row_to_document(row, title_col, text_col) -> dict:
+    title = str(row[title_col]).strip() if title_col and pd.notna(row[title_col]) else ""
+    body = str(row[text_col]).strip() if text_col and pd.notna(row[text_col]) else ""
+    text = f"{title}\n{body}" if title else body
+    label = title or (body[:70] + "…" if len(body) > 70 else body) or "Untitled abstract"
+    return {"label": label, "text": text}
 
 
 def clean_text(text: str) -> str:

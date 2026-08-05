@@ -17,7 +17,7 @@ from utils.clusters import cluster_label, derive_clusters
 from utils.inference import run_inference
 from utils.mention_selector import mention_click_selector
 from utils.rendering import mention_context
-from utils.scoring import compute_gold_score, compute_pairwise_prf
+from utils.scoring import aggregate_pairwise_prf, compute_gold_score, compute_pairwise_prf
 from utils.session import (
     clear_status_widget_keys,
     cluster_status,
@@ -28,7 +28,14 @@ from utils.session import (
     remove_mentions,
     reset_corrections,
 )
-from utils.text_processing import clean_text, extract_documents_from_url, extract_text
+from utils.text_processing import (
+    clean_text,
+    csv_row_to_document,
+    extract_documents_from_url,
+    extract_text,
+    guess_csv_columns,
+    load_csv,
+)
 
 st.set_page_config(page_title="Coreference Resolution Dashboard", layout="wide")
 
@@ -44,10 +51,29 @@ st.session_state.setdefault("documents", [])  # list of per-abstract dicts
 st.session_state.setdefault("current_doc_id", None)  # which abstract is on screen
 st.session_state.setdefault("current_cluster_id", None)  # which cluster is expanded
 st.session_state.setdefault("nav_section", NAV_SECTIONS[0][0])
+st.session_state.setdefault("next_new_doc_id", 0)  # monotonic id counter, never reused
+st.session_state.setdefault("csv_upload_key", None)  # detects a newly-picked CSV file
+st.session_state.setdefault("csv_processed_count", 0)  # rows already batched in from the CSV
+st.session_state.setdefault("csv_data", None)  # parsed CSV, kept independent of the uploader widget
 
 
 def _doc_by_id(doc_id):
     return next((d for d in st.session_state.documents if d["id"] == doc_id), None)
+
+
+def _doc_is_done(d):
+    """An abstract counts as done once every cluster it has has been verified
+    (given a status other than the default 'Unverified')."""
+    cluster_ids = {m["cluster_id"] for m in d["mentions"]}
+    if not cluster_ids:
+        return True
+    return all(d["cluster_statuses"].get(cid, "Unverified") != "Unverified" for cid in cluster_ids)
+
+
+def _next_doc_id():
+    doc_id = st.session_state.next_new_doc_id
+    st.session_state.next_new_doc_id += 1
+    return doc_id
 
 
 # --- Sidebar: navigation + abstract picker ---
@@ -64,24 +90,37 @@ with st.sidebar:
             st.rerun()
 
     st.divider()
-    st.caption("Abstracts")
 
     if not st.session_state.documents:
-        st.caption("None processed yet — go to Run inference.")
+        st.caption("No abstracts processed yet — go to Run inference.")
     else:
-        for d in st.session_state.documents:
-            is_current_doc = d["id"] == st.session_state.current_doc_id
-            n_clusters = len({m["cluster_id"] for m in d["mentions"]})
+        total_docs = len(st.session_state.documents)
+        done_docs = sum(1 for d in st.session_state.documents if _doc_is_done(d))
+        st.progress(done_docs / total_docs, text=f"{done_docs} of {total_docs} abstracts done")
+
+        doc_ids = [d["id"] for d in st.session_state.documents]
+        if st.session_state.current_doc_id not in doc_ids:
+            st.session_state.current_doc_id = doc_ids[0]
+        cursor = doc_ids.index(st.session_state.current_doc_id)
+
+        nav_cols = st.columns(2)
+        with nav_cols[0]:
             if st.button(
-                d["label"][:70] + ("…" if len(d["label"]) > 70 else ""),
-                key=f"docsel_{d['id']}",
-                width="stretch",
-                type="primary" if is_current_doc else "secondary",
-                help=f"{n_clusters} clusters",
+                "Previous", icon=":material/chevron_left:", width="stretch", disabled=cursor == 0
             ):
-                st.session_state.current_doc_id = d["id"]
+                st.session_state.current_doc_id = doc_ids[cursor - 1]
                 st.session_state.current_cluster_id = None
                 st.rerun()
+        with nav_cols[1]:
+            if st.button(
+                "Next", icon=":material/chevron_right:", width="stretch",
+                disabled=cursor == total_docs - 1,
+            ):
+                st.session_state.current_doc_id = doc_ids[cursor + 1]
+                st.session_state.current_cluster_id = None
+                st.rerun()
+
+        st.caption(f"Abstract {cursor + 1} of {total_docs}")
 
 
 # --- Main area ---
@@ -92,32 +131,111 @@ doc = _doc_by_id(st.session_state.current_doc_id)
 
 if section == "Run inference":
     st.caption(
-        "Upload PDFs/.txt files or paste a web page URL — a page listing several write-ups "
-        "is split into one abstract per entry."
+        "Upload PDFs/.txt files, paste a web page URL, or bulk-load a CSV of abstracts. "
+        "A page or CSV with several write-ups is split into one abstract per entry."
     )
 
+    # st.segmented_control only honors default= the first time its key is set; a widget
+    # that goes unrendered for a run (e.g. while nav_section is elsewhere) gets its key
+    # dropped by Streamlit and re-mounts as "unset" next time, silently reverting to
+    # default=. Mirroring the last choice into our own state and feeding it back as
+    # default= keeps the tab you were on instead of snapping back to "Upload file".
+    st.session_state.setdefault("run_input_mode", "Upload file")
     input_mode = st.segmented_control(
-        "Input source", ["Upload file", "From URL"], key="input_mode", default="Upload file"
+        "Input source", ["Upload file", "From URL", "From CSV"],
+        key="input_mode", default=st.session_state.run_input_mode,
     )
+    input_mode = input_mode or st.session_state.run_input_mode
+    st.session_state.run_input_mode = input_mode
+
+    csv_df, csv_title_col, csv_text_col, csv_batch_size = None, None, None, 0
+
     if input_mode == "From URL":
         url_input = st.text_input(
             "Web page URL",
             placeholder="https://example.com/abstracts",
             label_visibility="collapsed",
         )
-        uploaded_files = None
+        uploaded_files, csv_file = None, None
+
+    elif input_mode == "From CSV":
+        csv_file = st.file_uploader(
+            "CSV file", type=["csv"], label_visibility="collapsed", key="csv_uploader"
+        )
+        uploaded_files, url_input = None, ""
+
+        if csv_file is not None:
+            file_identity = f"{csv_file.name}:{csv_file.size}"
+            if st.session_state.csv_upload_key != file_identity:
+                st.session_state.csv_upload_key = file_identity
+                st.session_state.csv_processed_count = 0
+                loaded_df = load_csv(csv_file)
+                guessed_title, guessed_text = guess_csv_columns(loaded_df)
+                # Stored independently of the file_uploader widget: that widget's own
+                # value disappears whenever this "From CSV" branch goes unrendered for a
+                # run (same reset behavior as input_mode above), which would otherwise
+                # force re-uploading the whole file before every single batch.
+                st.session_state.csv_data = {
+                    "filename": csv_file.name,
+                    "df": loaded_df,
+                    "title_col": guessed_title,
+                    "text_col": guessed_text,
+                }
+
+        if st.session_state.csv_data is not None:
+            csv_info = st.session_state.csv_data
+            csv_df = csv_info["df"]
+            columns = list(csv_df.columns)
+            st.caption(f"Using {csv_info['filename']} ({len(csv_df)} rows).")
+
+            pick_cols = st.columns(2)
+            with pick_cols[0]:
+                csv_title_col = st.selectbox(
+                    "Title column", columns,
+                    index=columns.index(csv_info["title_col"]) if csv_info["title_col"] in columns else 0,
+                    key="csv_title_col",
+                )
+            with pick_cols[1]:
+                csv_text_col = st.selectbox(
+                    "Abstract/text column", columns,
+                    index=columns.index(csv_info["text_col"]) if csv_info["text_col"] in columns else 0,
+                    key="csv_text_col",
+                )
+            csv_info["title_col"], csv_info["text_col"] = csv_title_col, csv_text_col
+
+            total_rows = len(csv_df)
+            processed = min(st.session_state.csv_processed_count, total_rows)
+            remaining = total_rows - processed
+            st.caption(f"{processed} of {total_rows} rows processed so far.")
+
+            if remaining > 0:
+                csv_batch_size = st.number_input(
+                    "Rows to process in this run",
+                    min_value=1, max_value=remaining, value=min(50, remaining),
+                    key="csv_batch_size",
+                    help="Process a manageable batch at a time instead of all rows at once "
+                         "— each abstract takes real inference time, and clicking Run inference "
+                         "again picks up right where this batch left off.",
+                )
+            else:
+                st.success("Every row in this CSV has been processed.")
+
     else:
         uploaded_files = st.file_uploader(
             "Upload document(s)", type=["pdf", "txt"], accept_multiple_files=True,
             label_visibility="collapsed",
         )
-        url_input = ""
+        url_input, csv_file = "", None
 
+    run_disabled = input_mode == "From CSV" and (csv_df is None or csv_batch_size == 0)
+    run_label = "Process next batch" if input_mode == "From CSV" else "Run inference"
     run_clicked = st.button(
-        "Run inference", type="primary", icon=":material/play_arrow:", width="stretch"
+        run_label, type="primary", icon=":material/play_arrow:", width="stretch", disabled=run_disabled
     )
 
     if run_clicked:
+        replace_documents = True
+
         if input_mode == "From URL":
             if not url_input.strip():
                 st.warning("Please enter a URL first.")
@@ -128,6 +246,19 @@ if section == "Run inference":
                 except requests.RequestException as e:
                     st.error(f"Couldn't fetch that URL: {e}")
                     st.stop()
+
+        elif input_mode == "From CSV":
+            replace_documents = False
+            start = st.session_state.csv_processed_count
+            batch_df = csv_df.iloc[start:start + csv_batch_size]
+            raw_docs = [
+                csv_row_to_document(row, csv_title_col, csv_text_col)
+                for _, row in batch_df.iterrows()
+            ]
+            # Advance past this batch even if every row in it turns out empty below,
+            # so a run of blank rows can't get the user stuck retrying the same slice.
+            st.session_state.csv_processed_count = start + len(batch_df)
+
         else:
             if not uploaded_files:
                 st.warning("Please upload at least one file first.")
@@ -139,34 +270,46 @@ if section == "Run inference":
         cleaned_docs = [d for d in cleaned_docs if d["text"].strip()]
 
         if not cleaned_docs:
+            if input_mode == "From CSV":
+                st.warning("This batch had no usable text (empty abstracts) — skipped ahead. Run inference again for the next batch.")
+                st.rerun()
             st.error(
                 "No text could be extracted. If this was a PDF, it may be scanned/image-based — "
                 "try a different file, OCR extraction, or a URL instead."
             )
             st.stop()
 
-        documents = []
-        with st.spinner(f"Running inference on {len(cleaned_docs)} abstract(s)... this can take a while on CPU."):
-            for i, d in enumerate(cleaned_docs):
-                mentions, num_clusters, static_metrics = run_inference(d["text"])
-                documents.append({
-                    "id": i,
-                    "label": d["label"],
-                    "text": d["text"],
-                    "mentions": mentions,
-                    "original_mentions": [dict(m) for m in mentions],
-                    "next_cluster_id": num_clusters,
-                    "original_next_cluster_id": num_clusters,
-                    "static_metrics": static_metrics,
-                    "cluster_statuses": {},
-                })
+        new_documents = []
+        progress = st.progress(0.0, text=f"Processing 0/{len(cleaned_docs)}...")
+        for i, d in enumerate(cleaned_docs):
+            mentions, num_clusters, static_metrics = run_inference(d["text"])
+            new_documents.append({
+                "id": _next_doc_id(),
+                "label": d["label"],
+                "text": d["text"],
+                "mentions": mentions,
+                "original_mentions": [dict(m) for m in mentions],
+                "next_cluster_id": num_clusters,
+                "original_next_cluster_id": num_clusters,
+                "static_metrics": static_metrics,
+                "cluster_statuses": {},
+            })
+            progress.progress(
+                (i + 1) / len(cleaned_docs),
+                text=f"Processing {i + 1}/{len(cleaned_docs)}: {d['label'][:60]}",
+            )
+        progress.empty()
 
-        st.session_state.documents = documents
-        st.session_state.current_doc_id = documents[0]["id"]
+        if replace_documents:
+            st.session_state.documents = new_documents
+        else:
+            st.session_state.documents.extend(new_documents)
+
+        st.session_state.current_doc_id = new_documents[0]["id"]
         st.session_state.current_cluster_id = None
         clear_status_widget_keys()
         st.session_state.nav_section = "Correct"
-        st.success(f"Done. Processed {len(documents)} abstract(s).")
+        st.success(f"Done. Processed {len(new_documents)} abstract(s).")
         st.rerun()
 
     with st.expander("Resume a saved session"):
@@ -274,7 +417,14 @@ else:
                             default=current_status,
                             label_visibility="collapsed",
                         )
-                        doc["cluster_statuses"][c["id"]] = picked_status or current_status
+                        new_status = picked_status or current_status
+                        if new_status != current_status:
+                            doc["cluster_statuses"][c["id"]] = new_status
+                            # The sidebar's "abstracts done" progress bar is rendered
+                            # earlier in the script than this card, so without a rerun
+                            # it would show last run's count instead of this change.
+                            st.rerun()
+                        doc["cluster_statuses"][c["id"]] = new_status
 
                     other_ids = [oc["id"] for oc in clusters if oc["id"] != c["id"]]
 
@@ -341,24 +491,26 @@ else:
                                     st.rerun()
 
                     if other_ids:
-                        options_key = "-".join(str(i) for i in other_ids)
-                        merge_cols = st.columns([3, 2])
-                        with merge_cols[0]:
-                            target = st.selectbox(
-                                "Merge into",
-                                other_ids,
-                                key=f"mergesel_{doc_id}_{c['id']}_{options_key}",
-                                label_visibility="collapsed",
-                                format_func=lambda x: f"Merge into cluster {x} — {labels_by_id.get(x, '')}",
-                            )
-                        with merge_cols[1]:
-                            if st.button(
-                                "Merge", key=f"mergebtn_{doc_id}_{c['id']}",
-                                icon=":material/call_merge:", width="stretch",
-                            ):
-                                merge_clusters(doc, c["id"], target)
-                                st.session_state.current_cluster_id = target
-                                st.rerun()
+                        # All candidates are shown as chips up front — no dropdown to open —
+                        # so you can see every other cluster's entity before picking one,
+                        # instead of reading them one at a time behind a select popup.
+                        st.caption("Merge this cluster into:")
+                        merge_target = st.pills(
+                            "Merge into",
+                            other_ids,
+                            selection_mode="single",
+                            format_func=lambda x: f"Cluster {x} — {labels_by_id.get(x, '')}",
+                            key=f"mergepills_{doc_id}_{c['id']}",
+                            label_visibility="collapsed",
+                        )
+                        if st.button(
+                            "Merge", key=f"mergebtn_{doc_id}_{c['id']}",
+                            icon=":material/call_merge:", width="stretch",
+                            disabled=merge_target is None,
+                        ):
+                            merge_clusters(doc, c["id"], merge_target)
+                            st.session_state.current_cluster_id = merge_target
+                            st.rerun()
 
             # --- Right: interactive document view (only when toggled on) ---
             if right is not None:
@@ -431,98 +583,212 @@ else:
             )
 
     elif section == "View corrected & predicted clusters":
-        original_labels_by_id = {c["id"]: cluster_label(c) for c in original_clusters}
+        scope = st.segmented_control(
+            "Scope", ["This abstract", "All abstracts"], key="compare_scope", default="This abstract"
+        )
 
-        col_orig, col_corrected = st.columns(2)
-        with col_orig:
-            st.caption(f"Original (model output) — {len(original_clusters)} clusters")
-            for oc in sorted(original_clusters, key=lambda c: c["size"], reverse=True):
-                st.markdown(f"**{original_labels_by_id[oc['id']]}** · {oc['size']} mentions")
-        with col_corrected:
-            st.caption(f"Corrected (your edits) — {len(clusters)} clusters")
-            for c2 in sorted(clusters, key=lambda c: c["size"], reverse=True):
-                st.markdown(f"**{labels_by_id[c2['id']]}** · {c2['size']} mentions")
+        if scope == "All abstracts":
+            all_docs = st.session_state.documents
+            all_original_counts = [len(derive_clusters(d["original_mentions"])) for d in all_docs]
+            all_corrected_counts = [len(derive_clusters(d["mentions"])) for d in all_docs]
+
+            m1, m2, m3 = st.columns(3)
+            m1.metric("Abstracts processed", len(all_docs))
+            m2.metric("Total original clusters", sum(all_original_counts))
+            m3.metric(
+                "Total corrected clusters", sum(all_corrected_counts),
+                delta=sum(all_corrected_counts) - sum(all_original_counts),
+            )
+
+            status_totals = {s: 0 for s in STATUS_OPTIONS}
+            for d in all_docs:
+                for c in derive_clusters(d["mentions"]):
+                    status_totals[cluster_status(d, c["id"])] += 1
+
+            st.caption("Cluster verification status — every cluster across every processed abstract")
+            status_df = pd.DataFrame({"status": list(status_totals), "count": list(status_totals.values())})
+            st.bar_chart(status_df.set_index("status")["count"])
+
+            st.caption("Per-abstract breakdown — click a column header to sort")
+            rows = []
+            for d in all_docs:
+                oc = derive_clusters(d["original_mentions"])
+                cc = derive_clusters(d["mentions"])
+                counts = {s: 0 for s in STATUS_OPTIONS}
+                for c in cc:
+                    counts[cluster_status(d, c["id"])] += 1
+                rows.append({
+                    "Abstract": d["label"],
+                    "Original clusters": len(oc),
+                    "Corrected clusters": len(cc),
+                    "Correct": counts["Correct"],
+                    "Incorrect": counts["Incorrect"],
+                    "Unsure": counts["Unsure"],
+                    "Unverified": counts["Unverified"],
+                })
+            st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
+
+        else:
+            original_labels_by_id = {c["id"]: cluster_label(c) for c in original_clusters}
+
+            status_counts = {s: 0 for s in STATUS_OPTIONS}
+            for c in clusters:
+                status_counts[cluster_status(doc, c["id"])] += 1
+
+            m1, m2 = st.columns(2)
+            m1.metric("Original clusters", len(original_clusters))
+            m2.metric("Corrected clusters", len(clusters), delta=len(clusters) - len(original_clusters))
+
+            st.caption("Cluster verification status — this abstract")
+            status_df = pd.DataFrame({"status": list(status_counts), "count": list(status_counts.values())})
+            st.bar_chart(status_df.set_index("status")["count"])
+
+            col_orig, col_corrected = st.columns(2)
+            with col_orig:
+                st.caption(f"Original (model output) — {len(original_clusters)} clusters")
+                for oc in sorted(original_clusters, key=lambda c: c["size"], reverse=True):
+                    st.markdown(f"**{original_labels_by_id[oc['id']]}** · {oc['size']} mentions")
+            with col_corrected:
+                st.caption(f"Corrected (your edits) — {len(clusters)} clusters")
+                for c2 in sorted(clusters, key=lambda c: c["size"], reverse=True):
+                    st.markdown(f"**{labels_by_id[c2['id']]}** · {c2['size']} mentions")
 
     elif section == "Metrics":
-        m1, m2, m3, m4 = st.columns(4)
-        m1.metric("Clusters", len(clusters))
-        m2.metric("Largest cluster", max((c["size"] for c in clusters), default=0))
-        m3.metric("Singletons", sum(1 for c in clusters if c["size"] == 1))
-        m4.metric("Words", doc["static_metrics"]["doc_words"])
-
-        v1, v2, v3, v4 = st.columns(4)
-        v1.metric("Verified correct", verified_correct)
-        v2.metric("Verified incorrect", verified_incorrect)
-        v3.metric("Marked unsure", verified_unsure)
-        v4.metric("Still unverified", verified_pending)
-
-        has_edits = {(m["start"], m["end"], m["cluster_id"]) for m in doc["mentions"]} != {
-            (m["start"], m["end"], m["cluster_id"]) for m in doc["original_mentions"]
-        }
-        st.caption(
-            "Model accuracy scored against your corrections (mention-pair precision/recall), "
-            "treating your corrected clusters as gold:"
+        metrics_scope = st.segmented_control(
+            "Scope", ["This abstract", "All abstracts"], key="metrics_scope", default="This abstract"
         )
-        if not has_edits:
-            st.info("No corrections made yet — go to Correct and edit clusters to see a score here.")
-        else:
-            prf = compute_pairwise_prf(doc["original_mentions"], doc["mentions"])
-            p1, p2, p3, p4 = st.columns(4)
-            p1.metric("Precision", f'{prf["precision"]:.2f}')
-            p2.metric("Recall", f'{prf["recall"]:.2f}')
-            p3.metric("F1", f'{prf["f1"]:.2f}')
-            p4.metric("Mentions removed", prf["num_removed_mentions"])
-            if verified_pending:
-                st.caption(
-                    f"{verified_pending} of {len(clusters)} clusters are still unverified — "
-                    "this score may shift as you keep reviewing."
-                )
 
-        with st.expander("Validate against gold clusters"):
+        if metrics_scope == "All abstracts":
+            all_docs = st.session_state.documents
+            all_clusters = [derive_clusters(d["mentions"]) for d in all_docs]
+
+            m1, m2, m3, m4 = st.columns(4)
+            m1.metric("Abstracts processed", len(all_docs))
+            m2.metric("Total clusters", sum(len(cs) for cs in all_clusters))
+            m3.metric("Total singletons", sum(1 for cs in all_clusters for c in cs if c["size"] == 1))
+            m4.metric("Total words", sum(d["static_metrics"]["doc_words"] for d in all_docs))
+
+            status_totals = {s: 0 for s in STATUS_OPTIONS}
+            for d, cs in zip(all_docs, all_clusters):
+                for c in cs:
+                    status_totals[cluster_status(d, c["id"])] += 1
+
+            v1, v2, v3, v4 = st.columns(4)
+            v1.metric("Verified correct", status_totals["Correct"])
+            v2.metric("Verified incorrect", status_totals["Incorrect"])
+            v3.metric("Marked unsure", status_totals["Unsure"])
+            v4.metric("Still unverified", status_totals["Unverified"])
+
             st.caption(
-                "Paste in the mentions you know belong to one real entity (comma-separated). "
-                "The app merges every corrected cluster that overlaps with your list and scores against that."
+                "Model accuracy scored against your corrections, pooled across every abstract "
+                "that has at least one edit (mention-pair precision/recall):"
             )
-            gold_col1, gold_col2 = st.columns([1, 2])
-            with gold_col1:
-                entity_name = st.text_input(
-                    "Entity name (label only)", placeholder="e.g. Dumbledore", key=f"goldname_{doc_id}"
+            edited_docs_prf = []
+            for d in all_docs:
+                has_edits = {(m["start"], m["end"], m["cluster_id"]) for m in d["mentions"]} != {
+                    (m["start"], m["end"], m["cluster_id"]) for m in d["original_mentions"]
+                }
+                if has_edits:
+                    edited_docs_prf.append(compute_pairwise_prf(d["original_mentions"], d["mentions"]))
+
+            if not edited_docs_prf:
+                st.info("No corrections made yet on any abstract — edit clusters in Correct to see a score here.")
+            else:
+                agg_prf = aggregate_pairwise_prf(edited_docs_prf)
+                p1, p2, p3, p4 = st.columns(4)
+                p1.metric("Precision", f'{agg_prf["precision"]:.2f}')
+                p2.metric("Recall", f'{agg_prf["recall"]:.2f}')
+                p3.metric("F1", f'{agg_prf["f1"]:.2f}')
+                p4.metric("Mentions removed", agg_prf["num_removed_mentions"])
+                st.caption(
+                    f"Pooled from {len(edited_docs_prf)} of {len(all_docs)} abstracts that have edits so far."
                 )
-            with gold_col2:
-                gold_input = st.text_area(
-                    "Gold mentions (comma-separated)",
-                    placeholder="A man, this man, He, Albus Dumbledore, his, him",
-                    height=80,
-                    key=f"goldmentions_{doc_id}",
+                if status_totals["Unverified"]:
+                    st.caption(
+                        f"{status_totals['Unverified']} clusters are still unverified across all abstracts — "
+                        "this score may shift as you keep reviewing."
+                    )
+
+        else:
+            m1, m2, m3, m4 = st.columns(4)
+            m1.metric("Clusters", len(clusters))
+            m2.metric("Largest cluster", max((c["size"] for c in clusters), default=0))
+            m3.metric("Singletons", sum(1 for c in clusters if c["size"] == 1))
+            m4.metric("Words", doc["static_metrics"]["doc_words"])
+
+            v1, v2, v3, v4 = st.columns(4)
+            v1.metric("Verified correct", verified_correct)
+            v2.metric("Verified incorrect", verified_incorrect)
+            v3.metric("Marked unsure", verified_unsure)
+            v4.metric("Still unverified", verified_pending)
+
+            has_edits = {(m["start"], m["end"], m["cluster_id"]) for m in doc["mentions"]} != {
+                (m["start"], m["end"], m["cluster_id"]) for m in doc["original_mentions"]
+            }
+            st.caption(
+                "Model accuracy scored against your corrections (mention-pair precision/recall), "
+                "treating your corrected clusters as gold:"
+            )
+            if not has_edits:
+                st.info("No corrections made yet — go to Correct and edit clusters to see a score here.")
+            else:
+                prf = compute_pairwise_prf(doc["original_mentions"], doc["mentions"])
+                p1, p2, p3, p4 = st.columns(4)
+                p1.metric("Precision", f'{prf["precision"]:.2f}')
+                p2.metric("Recall", f'{prf["recall"]:.2f}')
+                p3.metric("F1", f'{prf["f1"]:.2f}')
+                p4.metric("Mentions removed", prf["num_removed_mentions"])
+                if verified_pending:
+                    st.caption(
+                        f"{verified_pending} of {len(clusters)} clusters are still unverified — "
+                        "this score may shift as you keep reviewing."
+                    )
+
+            with st.expander("Validate against gold clusters"):
+                st.caption(
+                    "Paste in the mentions you know belong to one real entity (comma-separated). "
+                    "The app merges every corrected cluster that overlaps with your list and scores against that."
                 )
+                gold_col1, gold_col2 = st.columns([1, 2])
+                with gold_col1:
+                    entity_name = st.text_input(
+                        "Entity name (label only)", placeholder="e.g. Dumbledore", key=f"goldname_{doc_id}"
+                    )
+                with gold_col2:
+                    gold_input = st.text_area(
+                        "Gold mentions (comma-separated)",
+                        placeholder="A man, this man, He, Albus Dumbledore, his, him",
+                        height=80,
+                        key=f"goldmentions_{doc_id}",
+                    )
 
-            if st.button("Compute score", icon=":material/analytics:", key=f"goldscorebtn_{doc_id}"):
-                if not gold_input.strip():
-                    st.warning("Paste at least one gold mention first.")
-                else:
-                    gold_mentions = gold_input.split(",")
-                    score = compute_gold_score(gold_mentions, clusters)
+                if st.button("Compute score", icon=":material/analytics:", key=f"goldscorebtn_{doc_id}"):
+                    if not gold_input.strip():
+                        st.warning("Paste at least one gold mention first.")
+                    else:
+                        gold_mentions = gold_input.split(",")
+                        score = compute_gold_score(gold_mentions, clusters)
 
-                    s1, s2, s3, s4 = st.columns(4)
-                    s1.metric("Precision", f'{score["precision"]:.2f}')
-                    s2.metric("Recall", f'{score["recall"]:.2f}')
-                    s3.metric("F1", f'{score["f1"]:.2f}')
-                    s4.metric("Fragments merged", score["num_fragments"])
+                        s1, s2, s3, s4 = st.columns(4)
+                        s1.metric("Precision", f'{score["precision"]:.2f}')
+                        s2.metric("Recall", f'{score["recall"]:.2f}')
+                        s3.metric("F1", f'{score["f1"]:.2f}')
+                        s4.metric("Fragments merged", score["num_fragments"])
 
-                    if score["num_fragments"] > 1:
-                        st.warning(
-                            f'"{entity_name or "This entity"}" was split across '
-                            f'{score["num_fragments"]} separate clusters '
-                            f'({score["matched_cluster_ids"]}) instead of being unified into one.'
-                        )
+                        if score["num_fragments"] > 1:
+                            st.warning(
+                                f'"{entity_name or "This entity"}" was split across '
+                                f'{score["num_fragments"]} separate clusters '
+                                f'({score["matched_cluster_ids"]}) instead of being unified into one.'
+                            )
 
-                    if score["missed"]:
-                        st.error(
-                            f'Missed entirely (in your gold list, not found in any matched cluster): '
-                            f'{score["missed"]}'
-                        )
-                    if score["extra"]:
-                        st.info(
-                            f'Extra (included, not in your gold list — check these for false merges): '
-                            f'{score["extra"]}'
-                        )
+                        if score["missed"]:
+                            st.error(
+                                f'Missed entirely (in your gold list, not found in any matched cluster): '
+                                f'{score["missed"]}'
+                            )
+                        if score["extra"]:
+                            st.info(
+                                f'Extra (included, not in your gold list — check these for false merges): '
+                                f'{score["extra"]}'
+                            )
