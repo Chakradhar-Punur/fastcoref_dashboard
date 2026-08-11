@@ -19,9 +19,12 @@ from utils.mention_selector import mention_click_selector
 from utils.rendering import mention_context
 from utils.scoring import aggregate_pairwise_prf, compute_gold_score, compute_pairwise_prf
 from utils.session import (
+    add_mention,
     clear_status_widget_keys,
     cluster_status,
+    export_finetuning_records,
     export_session,
+    find_text_occurrences,
     load_session,
     merge_clusters,
     move_mentions,
@@ -122,6 +125,24 @@ with st.sidebar:
 
         st.caption(f"Abstract {cursor + 1} of {total_docs}")
 
+        goto_cols = st.columns([3, 1])
+        with goto_cols[0]:
+            # Keyed on `cursor` so the box remounts (and re-applies value=) every
+            # time the current abstract changes via Previous/Next/Go — otherwise
+            # Streamlit would keep showing whatever number was last typed here.
+            goto_number = st.number_input(
+                "Go to abstract #", min_value=1, max_value=total_docs,
+                value=cursor + 1, step=1, key=f"goto_abstract_{cursor}",
+                label_visibility="collapsed",
+            )
+        with goto_cols[1]:
+            if st.button("Go", key="goto_abstract_btn", width="stretch"):
+                target_cursor = int(goto_number) - 1
+                if target_cursor != cursor:
+                    st.session_state.current_doc_id = doc_ids[target_cursor]
+                    st.session_state.current_cluster_id = None
+                st.rerun()
+
 
 # --- Main area ---
 st.title("Coreference resolution dashboard")
@@ -166,9 +187,16 @@ if section == "Run inference":
 
         if csv_file is not None:
             file_identity = f"{csv_file.name}:{csv_file.size}"
-            if st.session_state.csv_upload_key != file_identity:
-                st.session_state.csv_upload_key = file_identity
-                st.session_state.csv_processed_count = 0
+            is_new_file = st.session_state.csv_upload_key != file_identity
+            # Re-parse when it's a genuinely new file, OR when csv_data is missing even
+            # though the identity matches — that happens right after loading a saved
+            # session (which restores csv_upload_key/csv_processed_count but can't carry
+            # the parsed DataFrame itself). Only reset the progress counter for an
+            # actually-new file — matching identity means "resume", not "start over".
+            if is_new_file or st.session_state.csv_data is None:
+                if is_new_file:
+                    st.session_state.csv_upload_key = file_identity
+                    st.session_state.csv_processed_count = 0
                 loaded_df = load_csv(csv_file)
                 guessed_title, guessed_text = guess_csv_columns(loaded_df)
                 # Stored independently of the file_uploader widget: that widget's own
@@ -375,6 +403,67 @@ else:
                 st.bar_chart(dist_df.set_index("id")["size"])
             else:
                 st.caption("No clusters to chart.")
+
+        # Without expanded=True, the expander snaps shut on the very next rerun —
+        # which happens as soon as you type into the text box inside it. Keying
+        # openness off whether it already has text keeps it open once you start
+        # using it, instead of collapsing after your first keystroke commits.
+        add_text_key = f"addmention_text_{doc_id}"
+        with st.expander(
+            ":material/add_circle: Add a missed mention",
+            expanded=bool(st.session_state.get(add_text_key, "").strip()),
+        ):
+            st.caption(
+                "For an entity the model missed entirely — nothing is highlighted for it "
+                "in the document, so there's no existing mention to click. Paste its exact "
+                "wording from the abstract below, then assign it to a cluster."
+            )
+            add_text = st.text_input(
+                "Mention text", key=add_text_key,
+                placeholder='Copy the exact wording, e.g. "an orthogonality loss"',
+            )
+            add_text = add_text.strip()
+
+            if add_text:
+                occurrences = find_text_occurrences(text, add_text)
+                if not occurrences:
+                    st.warning("That exact text wasn't found in this abstract — check spelling/casing.")
+                else:
+                    if len(occurrences) == 1:
+                        chosen_start, chosen_end = occurrences[0]
+                    else:
+                        occ_labels = [
+                            f"…{text[max(0, s - 30):s]}[{text[s:e]}]{text[e:e + 30]}…"
+                            for s, e in occurrences
+                        ]
+                        occ_choice = st.selectbox(
+                            f"Found {len(occurrences)} occurrences — pick the right one",
+                            range(len(occurrences)), format_func=lambda i: occ_labels[i],
+                            key=f"addmention_occ_{doc_id}",
+                        )
+                        chosen_start, chosen_end = occurrences[occ_choice]
+
+                    already_tracked = any(
+                        m["start"] == chosen_start and m["end"] == chosen_end for m in doc["mentions"]
+                    )
+                    if already_tracked:
+                        st.caption("This exact span is already tracked as a mention.")
+                    else:
+                        add_target = st.selectbox(
+                            "Add to",
+                            [NEW_SINGLETON] + [c["id"] for c in clusters],
+                            format_func=lambda x: (
+                                "Create a new cluster" if x == NEW_SINGLETON
+                                else f"Cluster {x} — {labels_by_id.get(x, '')}"
+                            ),
+                            key=f"addmention_target_{doc_id}",
+                        )
+                        if st.button(
+                            "Add mention", icon=":material/add:", width="stretch",
+                            key=f"addmentionbtn_{doc_id}",
+                        ):
+                            add_mention(doc, chosen_start, chosen_end, add_text, add_target)
+                            st.rerun()
 
         if not display_clusters:
             st.caption("No clusters match this filter.")
@@ -614,34 +703,49 @@ else:
             for d in all_docs:
                 oc = derive_clusters(d["original_mentions"])
                 cc = derive_clusters(d["mentions"])
-                counts = {s: 0 for s in STATUS_OPTIONS}
-                for c in cc:
-                    counts[cluster_status(d, c["id"])] += 1
                 rows.append({
                     "Abstract": d["label"],
                     "Original clusters": len(oc),
                     "Corrected clusters": len(cc),
-                    "Correct": counts["Correct"],
-                    "Incorrect": counts["Incorrect"],
-                    "Unsure": counts["Unsure"],
-                    "Unverified": counts["Unverified"],
                 })
             st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
 
+            st.divider()
+            st.caption(
+                "Export for fine-tuning — one JSON object per line (JSONL), one line per abstract: "
+                "`{id, label, text, clusters}`, where clusters is a list of [start, end] mention "
+                "spans per entity. Use the corrected file as your training/gold data; the original "
+                "(model-predicted) file is for before/after evaluation, not for training on directly "
+                "— it still has the errors you just fixed."
+            )
+            export_cols = st.columns(2)
+            with export_cols[0]:
+                corrected_jsonl = "\n".join(
+                    json.dumps(r) for r in export_finetuning_records(use_corrected=True)
+                )
+                st.download_button(
+                    "Download corrected clusters (JSONL)",
+                    data=corrected_jsonl,
+                    file_name="corrected_clusters.jsonl",
+                    mime="application/jsonl",
+                    icon=":material/download:",
+                    width="stretch",
+                )
+            with export_cols[1]:
+                original_jsonl = "\n".join(
+                    json.dumps(r) for r in export_finetuning_records(use_corrected=False)
+                )
+                st.download_button(
+                    "Download original (predicted) clusters (JSONL)",
+                    data=original_jsonl,
+                    file_name="original_clusters.jsonl",
+                    mime="application/jsonl",
+                    icon=":material/download:",
+                    width="stretch",
+                )
+
         else:
             original_labels_by_id = {c["id"]: cluster_label(c) for c in original_clusters}
-
-            status_counts = {s: 0 for s in STATUS_OPTIONS}
-            for c in clusters:
-                status_counts[cluster_status(doc, c["id"])] += 1
-
-            m1, m2 = st.columns(2)
-            m1.metric("Original clusters", len(original_clusters))
-            m2.metric("Corrected clusters", len(clusters), delta=len(clusters) - len(original_clusters))
-
-            st.caption("Cluster verification status — this abstract")
-            status_df = pd.DataFrame({"status": list(status_counts), "count": list(status_counts.values())})
-            st.bar_chart(status_df.set_index("status")["count"])
 
             col_orig, col_corrected = st.columns(2)
             with col_orig:
@@ -678,6 +782,10 @@ else:
             v2.metric("Verified incorrect", status_totals["Incorrect"])
             v3.metric("Marked unsure", status_totals["Unsure"])
             v4.metric("Still unverified", status_totals["Unverified"])
+
+            st.caption("Cluster verification status — every cluster across every processed abstract")
+            status_df = pd.DataFrame({"status": list(status_totals), "count": list(status_totals.values())})
+            st.bar_chart(status_df.set_index("status")["count"])
 
             st.caption(
                 "Model accuracy scored against your corrections, pooled across every abstract "
