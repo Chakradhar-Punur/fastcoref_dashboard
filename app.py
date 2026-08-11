@@ -9,6 +9,7 @@ Run:
 import json
 
 import pandas as pd
+import plotly.graph_objects as go
 import requests
 import streamlit as st
 
@@ -822,8 +823,29 @@ else:
                     )
 
                 st.caption("Metric trends across abstracts with edits")
-                metrics_df = pd.DataFrame(per_abstract_metrics).set_index("Abstract")
-                st.line_chart(metrics_df)
+                metrics_df = pd.DataFrame(per_abstract_metrics)
+
+                # Create Plotly line chart for better visualization and sizing
+                fig = go.Figure()
+                for col in ["Precision", "Recall", "F1"]:
+                    fig.add_trace(go.Scatter(
+                        x=metrics_df["Abstract"],
+                        y=metrics_df[col],
+                        mode="lines+markers",
+                        name=col,
+                        line=dict(width=3),
+                        marker=dict(size=8)
+                    ))
+
+                fig.update_layout(
+                    title="",
+                    xaxis_title="Abstract",
+                    yaxis_title="Score",
+                    height=500,
+                    hovermode="x unified",
+                    template="plotly_dark" if st.get_option("theme.base") == "dark" else "plotly",
+                )
+                st.plotly_chart(fig, use_container_width=True)
 
         else:
             m1, m2, m3, m4 = st.columns(4)
