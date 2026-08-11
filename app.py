@@ -783,21 +783,25 @@ else:
             v3.metric("Marked unsure", status_totals["Unsure"])
             v4.metric("Still unverified", status_totals["Unverified"])
 
-            st.caption("Cluster verification status — every cluster across every processed abstract")
-            status_df = pd.DataFrame({"status": list(status_totals), "count": list(status_totals.values())})
-            st.bar_chart(status_df.set_index("status")["count"])
-
             st.caption(
                 "Model accuracy scored against your corrections, pooled across every abstract "
                 "that has at least one edit (mention-pair precision/recall):"
             )
             edited_docs_prf = []
+            per_abstract_metrics = []
             for d in all_docs:
                 has_edits = {(m["start"], m["end"], m["cluster_id"]) for m in d["mentions"]} != {
                     (m["start"], m["end"], m["cluster_id"]) for m in d["original_mentions"]
                 }
                 if has_edits:
-                    edited_docs_prf.append(compute_pairwise_prf(d["original_mentions"], d["mentions"]))
+                    prf = compute_pairwise_prf(d["original_mentions"], d["mentions"])
+                    edited_docs_prf.append(prf)
+                    per_abstract_metrics.append({
+                        "Abstract": d["label"][:25],
+                        "Precision": prf["precision"],
+                        "Recall": prf["recall"],
+                        "F1": prf["f1"],
+                    })
 
             if not edited_docs_prf:
                 st.info("No corrections made yet on any abstract — edit clusters in Correct to see a score here.")
@@ -816,6 +820,10 @@ else:
                         f"{status_totals['Unverified']} clusters are still unverified across all abstracts — "
                         "this score may shift as you keep reviewing."
                     )
+
+                st.caption("Metric trends across abstracts with edits")
+                metrics_df = pd.DataFrame(per_abstract_metrics).set_index("Abstract")
+                st.line_chart(metrics_df)
 
         else:
             m1, m2, m3, m4 = st.columns(4)
