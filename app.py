@@ -845,7 +845,7 @@ else:
                     hovermode="x unified",
                     template="plotly_dark" if st.get_option("theme.base") == "dark" else "plotly",
                 )
-                st.plotly_chart(fig, use_container_width=True)
+                st.plotly_chart(fig, width="stretch")
 
         else:
             m1, m2, m3, m4 = st.columns(4)
