@@ -608,7 +608,8 @@ else:
                     st.subheader("Document view")
                     st.caption(
                         "Click a mention to select it; click again to deselect. "
-                        "Or click and drag across a region to select every mention it passes over."
+                        "Or click and drag across a region to select every mention it passes over. "
+                        "Drag across plain text to select and copy it as usual."
                     )
 
                     doc_selected = mention_click_selector(

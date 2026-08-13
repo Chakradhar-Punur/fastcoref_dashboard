@@ -10,6 +10,8 @@ _CSS = """
   font-size: 14px;
   white-space: pre-wrap;
   padding: 8px;
+  user-select: text;
+  -webkit-user-select: text;
 }
 .coref-mention {
   background: #f7b955;
@@ -17,6 +19,8 @@ _CSS = """
   border-radius: 3px;
   padding: 0 2px;
   cursor: pointer;
+  user-select: text;
+  -webkit-user-select: text;
 }
 .coref-mention.selected {
   background: #2f6fed;
@@ -98,19 +102,22 @@ export default function (component) {
     }
   })
 
-  // Click-and-drag: press anywhere in the document, sweep across it, release —
+  // Click-and-drag: press on a mention, sweep across the document, release —
   // every mention the pointer passed over gets added to the selection. A plain
   // click (the pointer never enters a second mention) still just toggles the one
-  // mention pressed, same as before.
+  // mention pressed, same as before. A press that does NOT start on a mention
+  // (plain text, whitespace) is left alone entirely so the browser's normal
+  // text selection kicks in — this is what lets the reviewer select and copy
+  // text out of the document.
   doc.onmousedown = (e) => {
+    const startMark = e.target.closest(".coref-mention")
+    if (!startMark) return
+
     isDragging = true
     dragTouched = new Set()
-    const startMark = e.target.closest(".coref-mention")
-    if (startMark) {
-      const spanKey = `${startMark.dataset.start}-${startMark.dataset.end}`
-      dragTouched.add(spanKey)
-      startMark.classList.add("dragging")
-    }
+    const spanKey = `${startMark.dataset.start}-${startMark.dataset.end}`
+    dragTouched.add(spanKey)
+    startMark.classList.add("dragging")
     e.preventDefault()
   }
 

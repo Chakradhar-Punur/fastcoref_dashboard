@@ -4,7 +4,9 @@
       "Bash(python3 -m py_compile app.py)",
       "Bash(pip install *)",
       "Bash(lsof -nP -iTCP -sTCP:LISTEN)",
-      "Bash(awk '{print $2, $9}')"
+      "Bash(awk '{print $2, $9}')",
+      "Bash(python3 -c ' *)",
+      "Bash(pkill -f \"streamlit run /private/tmp/claude-501.*test_selector.py\")"
     ]
   }
 }
