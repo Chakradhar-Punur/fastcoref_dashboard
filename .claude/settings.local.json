@@ -6,7 +6,10 @@
       "Bash(lsof -nP -iTCP -sTCP:LISTEN)",
       "Bash(awk '{print $2, $9}')",
       "Bash(python3 -c ' *)",
-      "Bash(pkill -f \"streamlit run /private/tmp/claude-501.*test_selector.py\")"
+      "Bash(pkill -f \"streamlit run /private/tmp/claude-501.*test_selector.py\")",
+      "Bash(.venv/bin/streamlit run *)",
+      "Read(//tmp/**)",
+      "Bash(pkill -f \"streamlit run /private/tmp/claude-501.*test_chart.py\")"
     ]
   }
 }

@@ -785,6 +785,45 @@ else:
             v3.metric("Marked unsure", status_totals["Unsure"])
             v4.metric("Still unverified", status_totals["Unverified"])
 
+            with st.expander("Clusters needing attention", icon=":material/flag:"):
+                review_filter = st.segmented_control(
+                    "Show", ["Singletons", "Incorrect", "Unsure"],
+                    key="review_filter", default="Singletons",
+                )
+                review_filter = review_filter or "Singletons"
+
+                flagged = []
+                for d, cs in zip(all_docs, all_clusters):
+                    for c in cs:
+                        status = cluster_status(d, c["id"])
+                        is_match = (
+                            (review_filter == "Singletons" and c["size"] == 1)
+                            or (review_filter == "Incorrect" and status == "Incorrect")
+                            or (review_filter == "Unsure" and status == "Unsure")
+                        )
+                        if is_match:
+                            flagged.append((d, c))
+
+                if not flagged:
+                    st.caption(f"No {review_filter.lower()} clusters found.")
+                else:
+                    st.caption(f"{len(flagged)} cluster(s) found.")
+                    for d, c in flagged:
+                        row_cols = st.columns([3, 5, 2])
+                        with row_cols[0]:
+                            st.caption(d["label"][:40])
+                        with row_cols[1]:
+                            st.markdown(f"Cluster {c['id']} — {cluster_label(c)}")
+                        with row_cols[2]:
+                            if st.button(
+                                "Go to cluster", icon=":material/open_in_new:", width="stretch",
+                                key=f"gotocluster_{d['id']}_{c['id']}",
+                            ):
+                                st.session_state.current_doc_id = d["id"]
+                                st.session_state.current_cluster_id = c["id"]
+                                st.session_state.nav_section = "Correct"
+                                st.rerun()
+
             st.caption(
                 "Model accuracy scored against your corrections, pooled across every abstract "
                 "that has at least one edit (mention-pair precision/recall):"
@@ -823,14 +862,28 @@ else:
                         "this score may shift as you keep reviewing."
                     )
 
-                st.caption("Metric trends across abstracts with edits")
                 metrics_df = pd.DataFrame(per_abstract_metrics)
+                n_edited = len(metrics_df)
+                window = 10  # abstracts visible at once before you have to scroll
 
-                # Create Plotly line chart for better visualization and sizing
+                st.caption(
+                    "Metric trends across abstracts with edits"
+                    + (
+                        f" — showing {min(window, n_edited)} of {n_edited} at a time; "
+                        "drag the range slider below the chart (or its handles) to scroll left/right."
+                        if n_edited > window
+                        else ""
+                    )
+                )
+
+                # Plot against a numeric x-axis (with abstract names as tick labels)
+                # rather than the labels themselves, so the range slider works and
+                # doesn't need to squeeze every label into view at once.
+                x_vals = list(range(n_edited))
                 fig = go.Figure()
                 for col in ["Precision", "Recall", "F1"]:
                     fig.add_trace(go.Scatter(
-                        x=metrics_df["Abstract"],
+                        x=x_vals,
                         y=metrics_df[col],
                         mode="lines+markers",
                         name=col,
@@ -838,11 +891,18 @@ else:
                         marker=dict(size=8)
                     ))
 
+                fig.update_xaxes(
+                    tickmode="array",
+                    tickvals=x_vals,
+                    ticktext=metrics_df["Abstract"],
+                    rangeslider=dict(visible=True),
+                    range=[-0.5, min(window, n_edited) - 0.5],
+                )
                 fig.update_layout(
                     title="",
                     xaxis_title="Abstract",
                     yaxis_title="Score",
-                    height=500,
+                    height=560,
                     hovermode="x unified",
                     template="plotly_dark" if st.get_option("theme.base") == "dark" else "plotly",
                 )
