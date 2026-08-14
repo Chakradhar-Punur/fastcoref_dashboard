@@ -4,3 +4,5 @@ __pycache__/
 .DS_Store
 .idea/
 .streamlit/secrets.toml
+scripts/llm_extraction/.env
+ai_abstracts.csv

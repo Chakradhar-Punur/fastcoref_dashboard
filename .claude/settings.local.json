@@ -9,7 +9,29 @@
       "Bash(pkill -f \"streamlit run /private/tmp/claude-501.*test_selector.py\")",
       "Bash(.venv/bin/streamlit run *)",
       "Read(//tmp/**)",
-      "Bash(pkill -f \"streamlit run /private/tmp/claude-501.*test_chart.py\")"
+      "Bash(pkill -f \"streamlit run /private/tmp/claude-501.*test_chart.py\")",
+      "Skill(claude-api)",
+      "Skill(claude-api:*)",
+      "Bash(ant auth *)",
+      "Bash(env)",
+      "Bash(/Users/Chakradhar/fastcoref_dashboard/.venv/bin/python -c \"import anthropic; print\\(anthropic.__version__\\)\")",
+      "Bash(../../.venv/bin/python run_batch.py --csv \"/Users/Chakradhar/Library/Mobile Documents/com~apple~CloudDocs/Downloads/AI Internship/ai_abstracts.csv\" --out /tmp/dryrun_test.jsonl --limit 3 --dry-run)",
+      "Bash(../../.venv/bin/python run_batch.py --csv \"/Users/Chakradhar/Library/Mobile Documents/com~apple~CloudDocs/Downloads/AI Internship/ai_abstracts.csv\" --out /tmp/dryrun_test2.jsonl --limit 2 --dry-run)",
+      "Bash(grep -q \"sk-ant-\\\\.\\\\.\\\\.$\" .env)",
+      "Bash(chmod 600 .env)",
+      "Bash(../../.venv/bin/python jsonl_to_csv.py --in /tmp/test_opus_verify.jsonl --out /tmp/test_opus_verify.csv)",
+      "Bash(rm -f /tmp/test_opus_verify.jsonl /tmp/test_opus_verify.csv)",
+      "Bash(../../.venv/bin/python run_batch.py --csv \"/Users/Chakradhar/Library/Mobile Documents/com~apple~CloudDocs/Downloads/AI Internship/ai_abstracts.csv\" --out /tmp/test_opus_verify.jsonl --limit 3)",
+      "Bash(cd /Users/Chakradhar/fastcoref_dashboard/scripts/llm_extraction *)",
+      "Bash(../../.venv/bin/python run_batch.py --csv \"/Users/Chakradhar/Library/Mobile Documents/com~apple~CloudDocs/Downloads/AI Internship/ai_abstracts.csv\" --out /tmp/test_v2.jsonl --limit 3)",
+      "Bash(../../.venv/bin/python jsonl_to_csv.py --in /tmp/test_v2.jsonl --out /tmp/test_v2.csv)",
+      "Bash(rm -f /tmp/test_v2.jsonl /tmp/test_v2.csv)",
+      "Bash(../../.venv/bin/python -c \"import ast; ast.parse\\(open\\('extract_clusters.py'\\).read\\(\\)\\); print\\('syntax OK'\\)\")",
+      "Bash(gh repo *)",
+      "WebFetch(domain:github.com)",
+      "Bash(python3 -c \"import sys,json; [print\\(json.loads\\(l\\)['abstract_num']\\) for l in sys.stdin if l.strip\\(\\)]\")",
+      "WebFetch(domain:status.anthropic.com)",
+      "WebFetch(domain:status.claude.com)"
     ]
   }
 }
