@@ -170,16 +170,32 @@ def main():
                         file=sys.stderr,
                     )
                     sys.exit(1)
+                except anthropic.BadRequestError as e:
+                    if "credit balance" in str(e).lower():
+                        # Also not transient/row-specific — billing, not the request itself.
+                        print(f"  [{row_num}] OUT OF CREDIT: {e}", file=sys.stderr)
+                        print(
+                            "Stopping: add credit at https://console.anthropic.com (Plans & Billing), "
+                            "then re-run the same command (already-succeeded rows are skipped).",
+                            file=sys.stderr,
+                        )
+                        sys.exit(1)
+                    print(f"  [{row_num}] ERROR: {type(e).__name__}: {e}", file=sys.stderr)
+                    n_errors += 1
+                    continue
                 except Exception as e:  # noqa: BLE001 — log and keep going; don't lose the whole run to one bad row
                     print(f"  [{row_num}] ERROR: {type(e).__name__}: {e}", file=sys.stderr)
                     n_errors += 1
                     continue
 
-                clusters = result.parsed_output.clusters
+                parsed = result.parsed_output
+                clusters = parsed.clusters
                 record = {
                     "abstract_num": row_num,
                     "title": title,
                     "clusters": [c.model_dump() for c in clusters],
+                    "singleton_mentions": parsed.singleton_mentions,
+                    "self_reference_mentions": parsed.self_reference_mentions,
                 }
                 out_f.write(json.dumps(record) + "\n")
                 out_f.flush()
@@ -188,7 +204,11 @@ def main():
                 total_input_tokens += usage.input_tokens
                 total_output_tokens += usage.output_tokens
                 total_cache_read += usage.cache_read_input_tokens or 0
-                print(f"  [{row_num}] {len(clusters)} cluster(s) — {title[:60]}")
+                print(
+                    f"  [{row_num}] {len(clusters)} cluster(s), "
+                    f"{len(parsed.singleton_mentions)} singleton(s), "
+                    f"{len(parsed.self_reference_mentions)} self-ref mention(s) — {title[:60]}"
+                )
 
                 if args.sleep:
                     time.sleep(args.sleep)

@@ -126,6 +126,7 @@ def export_session() -> dict:
                 "original_next_cluster_id": doc["original_next_cluster_id"],
                 "static_metrics": doc["static_metrics"],
                 "cluster_statuses": {str(cid): s for cid, s in doc["cluster_statuses"].items()},
+                "csv_row_num": doc.get("csv_row_num"),
             }
             for doc in st.session_state.documents
         ],
@@ -146,6 +147,9 @@ def load_session(snapshot: dict):
             "original_next_cluster_id": doc["original_next_cluster_id"],
             "static_metrics": doc["static_metrics"],
             "cluster_statuses": {int(cid): s for cid, s in doc["cluster_statuses"].items()},
+            # .get(): older session files were saved before csv_row_num existed —
+            # those abstracts just fall back to title-matching for gold comparison.
+            "csv_row_num": doc.get("csv_row_num"),
         }
         for doc in snapshot["documents"]
     ]

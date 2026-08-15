@@ -1,0 +1,5 @@
+[client]
+# "viewer" hides rerun/clear-cache/deploy from the toolbar and menu — and,
+# more importantly, disables their keyboard shortcuts (r / c), which were
+# firing when Cmd+C was pressed to copy selected text on the page.
+toolbarMode = "viewer"

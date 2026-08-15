@@ -33,10 +33,19 @@ def main():
         for r in rows:
             if not r["clusters"]:
                 w.writerow([r["abstract_num"], r["title"], "(no multi-mention clusters found)", "", 0])
-                continue
             for c in r["clusters"]:
                 w.writerow([r["abstract_num"], r["title"], c["label"], "; ".join(c["mentions"]), len(c["mentions"])])
                 n_clusters += 1
+            # Singletons/self-reference are negative signal (things that should NEVER end up
+            # grouped with anything else) rather than real clusters, but still worth surfacing
+            # here for visibility — one row per entity, matching the same column shape.
+            for s in r.get("singleton_mentions", []):
+                w.writerow([r["abstract_num"], r["title"], f"[singleton] {s}", s, 1])
+            self_ref = r.get("self_reference_mentions", [])
+            if self_ref:
+                w.writerow(
+                    [r["abstract_num"], r["title"], "[self-reference]", "; ".join(self_ref), len(self_ref)]
+                )
 
     print(f"Wrote {len(rows)} abstracts, {n_clusters} clusters -> {args.out_path}")
 

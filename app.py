@@ -15,6 +15,12 @@ import streamlit as st
 
 from utils.constants import NEW_SINGLETON, STATUS_OPTIONS
 from utils.clusters import cluster_label, derive_clusters
+from utils.gold_compare import (
+    find_flagged_mentions_in_clusters,
+    find_missing_gold_entities,
+    load_llm_gold_jsonl,
+    match_clusters_to_gold,
+)
 from utils.inference import run_inference
 from utils.mention_selector import mention_click_selector
 from utils.rendering import mention_context
@@ -281,8 +287,11 @@ if section == "Run inference":
             start = st.session_state.csv_processed_count
             batch_df = csv_df.iloc[start:start + csv_batch_size]
             raw_docs = [
-                csv_row_to_document(row, csv_title_col, csv_text_col)
-                for _, row in batch_df.iterrows()
+                # batch_df.iterrows() yields the row's original position in the full CSV
+                # (unaffected by slicing), so idx + 1 is the same 1-based row number
+                # run_batch.py's abstract_num uses for this same file.
+                csv_row_to_document(row, csv_title_col, csv_text_col, row_num=idx + 1)
+                for idx, row in batch_df.iterrows()
             ]
             # Advance past this batch even if every row in it turns out empty below,
             # so a run of blank rows can't get the user stuck retrying the same slice.
@@ -295,7 +304,10 @@ if section == "Run inference":
             with st.spinner("Extracting text..."):
                 raw_docs = [{"label": f.name, "text": extract_text(f)} for f in uploaded_files]
 
-        cleaned_docs = [{"label": d["label"], "text": clean_text(d["text"])} for d in raw_docs]
+        cleaned_docs = [
+            {"label": d["label"], "text": clean_text(d["text"]), "csv_row_num": d.get("csv_row_num")}
+            for d in raw_docs
+        ]
         cleaned_docs = [d for d in cleaned_docs if d["text"].strip()]
 
         if not cleaned_docs:
@@ -322,6 +334,7 @@ if section == "Run inference":
                 "original_next_cluster_id": num_clusters,
                 "static_metrics": static_metrics,
                 "cluster_statuses": {},
+                "csv_row_num": d.get("csv_row_num"),
             })
             progress.progress(
                 (i + 1) / len(cleaned_docs),
@@ -386,6 +399,75 @@ else:
     st.header(doc["label"])
 
     if section == "Correct":
+        with st.expander(
+            ":material/compare_arrows: Compare against LLM gold clusters (optional)",
+            expanded=False,
+        ):
+            st.caption(
+                "Load the JSONL produced by scripts/llm_extraction/run_batch.py. Abstracts "
+                "imported 'From CSV' are matched by their exact CSV row number; abstracts from "
+                "a PDF/URL upload (no row number) fall back to matching by title. Clusters whose "
+                "mentions exactly match a gold entity can be bulk-marked Correct. Clusters "
+                "containing a mention gold says should be a singleton or is author self-reference "
+                "(we/us/our/I/my) — i.e. something that should never be grouped with anything — "
+                "can be bulk-marked Incorrect so you can find and remove them. Everything else "
+                "stays Unverified so you can filter to just what actually needs a look."
+            )
+            gold_file = st.file_uploader("LLM gold JSONL", type=["jsonl"], key="llm_gold_uploader")
+            if gold_file is not None:
+                try:
+                    st.session_state.llm_gold = load_llm_gold_jsonl(gold_file.getvalue())
+                except (json.JSONDecodeError, UnicodeDecodeError) as e:
+                    st.error(f"Couldn't parse that file: {e}")
+            if st.session_state.get("llm_gold"):
+                st.caption(f"Loaded gold data for {st.session_state.llm_gold['count']} abstract(s).")
+
+        gold_store = st.session_state.get("llm_gold") or {}
+        if doc.get("csv_row_num") is not None:
+            gold_data = gold_store.get("by_num", {}).get(doc["csv_row_num"])
+        else:
+            gold_data = gold_store.get("by_title", {}).get(doc["label"].strip().lower())
+        gold_entities = gold_data["clusters"] if gold_data else None
+        gold_matches = {}
+        flagged_by_cluster = {}
+        if gold_data:
+            gold_matches = match_clusters_to_gold(clusters, gold_entities)
+            missing_gold = find_missing_gold_entities(clusters, gold_entities)
+            flagged_by_cluster = find_flagged_mentions_in_clusters(
+                clusters, gold_data["singleton_mentions"], gold_data["self_reference_mentions"]
+            )
+            n_exact = sum(1 for m in gold_matches.values() if m and m["f1"] >= 0.999)
+            n_flagged_clusters = len(flagged_by_cluster)
+            st.caption(
+                f":material/compare_arrows: Gold check: {n_exact}/{len(clusters)} cluster(s) exactly "
+                f"match a gold entity · {len(missing_gold)} gold entit(y/ies) fastcoref missed entirely "
+                f"· {n_flagged_clusters} cluster(s) contain a mention that should never be grouped"
+            )
+            gold_cols = st.columns(2)
+            with gold_cols[0]:
+                if st.button(
+                    "Auto-mark exact matches Correct", key=f"automarkgold_{doc_id}",
+                    disabled=n_exact == 0, width="stretch",
+                ):
+                    for c in clusters:
+                        m = gold_matches.get(c["id"])
+                        if m and m["f1"] >= 0.999 and cluster_status(doc, c["id"]) == "Unverified":
+                            doc["cluster_statuses"][c["id"]] = "Correct"
+                    st.rerun()
+            with gold_cols[1]:
+                if st.button(
+                    "Auto-mark flagged clusters Incorrect", key=f"automarkflagged_{doc_id}",
+                    disabled=n_flagged_clusters == 0, width="stretch",
+                ):
+                    for cid in flagged_by_cluster:
+                        if cluster_status(doc, cid) == "Unverified":
+                            doc["cluster_statuses"][cid] = "Incorrect"
+                    st.rerun()
+            if missing_gold:
+                with st.expander(f"{len(missing_gold)} gold entit(y/ies) fastcoref found nothing for"):
+                    for g in missing_gold:
+                        st.markdown(f"**{g['label']}** — {', '.join(g['mentions'])}")
+
         header_cols = st.columns([2, 2])
         with header_cols[0]:
             status_filter = st.segmented_control(
@@ -498,6 +580,17 @@ else:
                     top_cols = st.columns([5, 3])
                     with top_cols[0]:
                         st.markdown(f"**Cluster {c['id']}** — {labels_by_id[c['id']]}")
+                        if gold_entities:
+                            gm = gold_matches.get(c["id"])
+                            if gm is None:
+                                st.caption(":material/help: no gold entity shares any mention with this cluster")
+                            elif gm["f1"] >= 0.999:
+                                st.caption(f":material/check_circle: exact match — gold entity **{gm['gold_label']}**")
+                            else:
+                                st.caption(
+                                    f":material/warning: partial match (F1 {gm['f1']:.2f}) — closest gold "
+                                    f"entity **{gm['gold_label']}** (P {gm['precision']:.2f} / R {gm['recall']:.2f})"
+                                )
                     with top_cols[1]:
                         current_status = cluster_status(doc, c["id"])
                         picked_status = st.segmented_control(
@@ -515,6 +608,23 @@ else:
                             # it would show last run's count instead of this change.
                             st.rerun()
                         doc["cluster_statuses"][c["id"]] = new_status
+
+                    flagged_here = flagged_by_cluster.get(c["id"], [])
+                    if flagged_here:
+                        with st.container(border=True):
+                            st.caption(
+                                ":material/report: gold says these mention(s) should never be grouped "
+                                "with anything — likely a false merge:"
+                            )
+                            for fm in flagged_here:
+                                st.markdown(f"- “{fm['text']}” — {fm['reason']}")
+                            if st.button(
+                                f"Remove flagged mention(s) from this cluster",
+                                icon=":material/delete_sweep:", width="stretch",
+                                key=f"removeflagged_{doc_id}_{c['id']}",
+                            ):
+                                remove_mentions(doc, [(fm["start"], fm["end"]) for fm in flagged_here])
+                                st.rerun()
 
                     other_ids = [oc["id"] for oc in clusters if oc["id"] != c["id"]]
 

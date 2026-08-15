@@ -103,12 +103,14 @@ def guess_csv_columns(df: pd.DataFrame):
     return title_col, text_col
 
 
-def csv_row_to_document(row, title_col, text_col) -> dict:
+def csv_row_to_document(row, title_col, text_col, row_num=None) -> dict:
     title = str(row[title_col]).strip() if title_col and pd.notna(row[title_col]) else ""
     body = str(row[text_col]).strip() if text_col and pd.notna(row[text_col]) else ""
     text = f"{title}\n{body}" if title else body
     label = title or (body[:70] + "…" if len(body) > 70 else body) or "Untitled abstract"
-    return {"label": label, "text": text}
+    # 1-based row number within the source CSV, when known — lets gold-comparison match
+    # this abstract exactly rather than by title, which can collide on duplicate titles.
+    return {"label": label, "text": text, "csv_row_num": row_num}
 
 
 def clean_text(text: str) -> str:

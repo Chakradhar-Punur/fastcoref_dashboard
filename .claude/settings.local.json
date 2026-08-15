@@ -31,7 +31,17 @@
       "WebFetch(domain:github.com)",
       "Bash(python3 -c \"import sys,json; [print\\(json.loads\\(l\\)['abstract_num']\\) for l in sys.stdin if l.strip\\(\\)]\")",
       "WebFetch(domain:status.anthropic.com)",
-      "WebFetch(domain:status.claude.com)"
+      "WebFetch(domain:status.claude.com)",
+      "Bash(.venv/bin/python -c \"import fastcoref, transformers; print\\('fastcoref OK, transformers', transformers.__version__\\)\")",
+      "Read(//Users/Chakradhar/.cache/huggingface/**)",
+      "Bash(../../.venv/bin/python score_fastcoref.py --csv \"/Users/Chakradhar/fastcoref_dashboard/ai_abstracts.csv\" --llm-gold /tmp/test20_opus.jsonl --start-row 1 --end-row 20 --out /tmp/score_test20.csv)",
+      "Bash(../../.venv/bin/python -c ' *)",
+      "Bash(.venv/bin/python -m py_compile app.py utils/gold_compare.py)",
+      "Bash(.venv/bin/python -c ' *)",
+      "mcp__claude-in-chrome__tabs_create_mcp",
+      "Bash(pkill -f \"streamlit run app.py --server.port 8502\")",
+      "Bash(.venv/bin/python -m py_compile app.py utils/gold_compare.py scripts/llm_extraction/extract_clusters.py scripts/llm_extraction/run_batch.py scripts/llm_extraction/jsonl_to_csv.py)",
+      "Bash(.venv/bin/python -m py_compile scripts/llm_extraction/run_batch.py)"
     ]
   }
 }
