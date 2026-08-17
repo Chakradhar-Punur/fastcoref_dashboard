@@ -60,11 +60,18 @@ def match_clusters_to_gold(fc_clusters: list, gold_entities: list) -> dict:
     """For each fastcoref cluster, find the gold entity it overlaps with most —
     by mention-text overlap, case-insensitive — and score that match.
 
-    Returns {cluster_id: None | {"gold_label", "precision", "recall", "f1"}}.
+    Returns {cluster_id: None | {"gold_label", "precision", "recall", "f1", "missed", "extra"}}.
     None means no gold entity shares even one mention with this cluster.
+    "missed" is the matched gold entity's mentions (verbatim, gold's casing) that
+    aren't in this cluster yet — e.g. after adding just one of a gold entity's several
+    mentions via 'Add a missed mention', this tells you what's still left to add,
+    even though the entity no longer counts as "entirely missing" (see
+    find_missing_gold_entities) once it has any overlap at all. "extra" is this
+    cluster's mentions (verbatim, fastcoref's casing) that aren't part of the
+    matched gold entity — a possible false merge.
     """
     gold_sets = [
-        ({m.strip().lower() for m in g["mentions"] if m.strip()}, g["label"])
+        ({m.strip().lower() for m in g["mentions"] if m.strip()}, g["label"], g["mentions"])
         for g in gold_entities
         if g.get("mentions")
     ]
@@ -73,7 +80,7 @@ def match_clusters_to_gold(fc_clusters: list, gold_entities: list) -> dict:
     for c in fc_clusters:
         c_mentions_lower = {m["text"].strip().lower() for m in c["mentions"]}
         best = None
-        for gold_set, label in gold_sets:
+        for gold_set, label, gold_mentions in gold_sets:
             overlap = c_mentions_lower & gold_set
             if not overlap:
                 continue
@@ -81,7 +88,12 @@ def match_clusters_to_gold(fc_clusters: list, gold_entities: list) -> dict:
             recall = len(overlap) / len(gold_set) if gold_set else 0.0
             f1 = (2 * precision * recall / (precision + recall)) if (precision + recall) else 0.0
             if best is None or f1 > best["f1"]:
-                best = {"gold_label": label, "precision": precision, "recall": recall, "f1": f1}
+                missed = sorted({m for m in gold_mentions if m.strip().lower() not in c_mentions_lower})
+                extra = sorted({m["text"] for m in c["mentions"] if m["text"].strip().lower() not in gold_set})
+                best = {
+                    "gold_label": label, "precision": precision, "recall": recall, "f1": f1,
+                    "missed": missed, "extra": extra,
+                }
         result[c["id"]] = best
     return result
 

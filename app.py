@@ -35,6 +35,7 @@ from utils.session import (
     load_session,
     merge_clusters,
     move_mentions,
+    remove_documents,
     remove_mentions,
     reset_corrections,
 )
@@ -379,6 +380,43 @@ if section == "Run inference":
             "then use Correct / View corrected & predicted clusters / Metrics above."
         )
 
+        with st.expander(":material/content_cut: Trim the working set"):
+            st.caption(
+                "Shrink how many abstracts you're on the hook for — e.g. you've corrected the "
+                "first 130 of 300 and only want 20 more to reach 150, instead of grinding through "
+                "all 300. This permanently drops the trimmed abstracts (and any corrections on "
+                "them) from this session; it doesn't touch the source CSV or re-queue those rows."
+            )
+            total_docs = len(st.session_state.documents)
+            keep_count = st.number_input(
+                "Keep only the first N abstracts (by processing order)",
+                min_value=1, max_value=total_docs, value=total_docs, key="trim_keep_count",
+            )
+            to_remove = st.session_state.documents[keep_count:]
+            if not to_remove:
+                st.caption("Nothing to remove at this count.")
+            else:
+                verified_among_removed = sum(
+                    1 for d in to_remove
+                    for c in derive_clusters(d["mentions"])
+                    if cluster_status(d, c["id"]) != "Unverified"
+                )
+                st.caption(
+                    f"Would remove {len(to_remove)} abstract(s) — positions {keep_count + 1} "
+                    f"to {total_docs}."
+                )
+                if verified_among_removed:
+                    st.warning(
+                        f"{verified_among_removed} cluster(s) among these abstracts already have "
+                        "a verification status — that work would be lost too."
+                    )
+                if st.button(
+                    f"Remove {len(to_remove)} abstract(s)", icon=":material/delete_sweep:",
+                    key="trim_remove_btn",
+                ):
+                    remove_documents([d["id"] for d in to_remove])
+                    st.rerun()
+
 elif doc is None:
     st.info("Go to 'Run inference' in the sidebar to add a file or URL first.")
 
@@ -591,6 +629,18 @@ else:
                                     f":material/warning: partial match (F1 {gm['f1']:.2f}) — closest gold "
                                     f"entity **{gm['gold_label']}** (P {gm['precision']:.2f} / R {gm['recall']:.2f})"
                                 )
+                                if gm["missed"]:
+                                    missed_list = ", ".join(f'"{m}"' for m in gm["missed"])
+                                    st.caption(
+                                        f":material/search: still missing from this cluster: {missed_list} "
+                                        "— paste one into 'Add a missed mention' below to add it here."
+                                    )
+                                if gm["extra"]:
+                                    extra_list = ", ".join(f'"{m}"' for m in gm["extra"])
+                                    st.caption(
+                                        f":material/report: in this cluster but not in gold's entity "
+                                        f"(check for a false merge): {extra_list}"
+                                    )
                     with top_cols[1]:
                         current_status = cluster_status(doc, c["id"])
                         picked_status = st.segmented_control(

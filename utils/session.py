@@ -7,6 +7,19 @@ def cluster_status(doc: dict, cluster_id) -> str:
     return doc["cluster_statuses"].get(cluster_id, "Unverified")
 
 
+def remove_documents(doc_ids: list):
+    """Permanently drop a batch of processed abstracts (and any corrections on
+    them) from the session — e.g. shrinking a 300-abstract working set down to
+    150 once you've decided that's enough, instead of grinding through the rest.
+    Doesn't touch csv_processed_count, so a CSV resume won't re-queue these rows."""
+    ids = set(doc_ids)
+    st.session_state.documents = [d for d in st.session_state.documents if d["id"] not in ids]
+    if st.session_state.current_doc_id in ids:
+        remaining = st.session_state.documents
+        st.session_state.current_doc_id = remaining[0]["id"] if remaining else None
+        st.session_state.current_cluster_id = None
+
+
 def remove_mentions(doc: dict, mention_keys: list):
     """Remove a batch of mentions (identified by (start, end) pairs) in one pass."""
     keys = set(mention_keys)
