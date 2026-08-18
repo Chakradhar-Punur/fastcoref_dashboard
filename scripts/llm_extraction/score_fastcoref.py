@@ -31,11 +31,11 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from utils.clusters import derive_clusters  # noqa: E402
-from utils.gold_compare import find_flagged_mentions_in_clusters  # noqa: E402
-from utils.inference import run_inference  # noqa: E402
-from utils.scoring import compute_gold_score  # noqa: E402
-from utils.text_processing import clean_text  # noqa: E402
+from utils.clusters import derive_clusters
+from utils.gold_compare import find_flagged_mentions_in_clusters
+from utils.inference import run_inference
+from utils.scoring import compute_gold_score
+from utils.text_processing import clean_text
 
 
 def load_llm_gold(path: Path) -> dict:
