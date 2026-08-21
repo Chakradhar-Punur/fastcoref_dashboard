@@ -6,3 +6,5 @@ __pycache__/
 .streamlit/secrets.toml
 scripts/llm_extraction/.env
 ai_abstracts.csv
+finetune_runs/
+cache/

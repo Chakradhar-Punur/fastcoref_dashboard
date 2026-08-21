@@ -7,6 +7,7 @@ Run:
 """
 
 import json
+import time
 
 import pandas as pd
 import plotly.graph_objects as go
@@ -15,13 +16,21 @@ import streamlit as st
 
 from utils.constants import NEW_SINGLETON, STATUS_OPTIONS
 from utils.clusters import cluster_label, derive_clusters
+from utils.finetune import (
+    RUNS_DIR,
+    model_dir,
+    model_ready,
+    prepare_split,
+    start_finetune_job,
+)
+from utils.finetune import tail as finetune_tail
 from utils.gold_compare import (
     find_flagged_mentions_in_clusters,
     find_missing_gold_entities,
     load_llm_gold_jsonl,
     match_clusters_to_gold,
 )
-from utils.inference import run_inference
+from utils.inference import MODEL_NAME_OR_PATH, active_model_label, run_inference
 from utils.mention_selector import mention_click_selector
 from utils.rendering import mention_context
 from utils.scoring import aggregate_pairwise_prf, compute_gold_score, compute_pairwise_prf
@@ -55,6 +64,7 @@ NAV_SECTIONS = [
     ("Correct", ":material/edit:"),
     ("View corrected & predicted clusters", ":material/compare_arrows:"),
     ("Metrics", ":material/analytics:"),
+    ("Fine-tune", ":material/model_training:"),
 ]
 
 # Session state
@@ -66,6 +76,8 @@ st.session_state.setdefault("next_new_doc_id", 0)  # monotonic id counter, never
 st.session_state.setdefault("csv_upload_key", None)  # detects a newly-picked CSV file
 st.session_state.setdefault("csv_processed_count", 0)  # rows already batched in from the CSV
 st.session_state.setdefault("csv_data", None)  # parsed CSV, kept independent of the uploader widget
+st.session_state.setdefault("finetune_prepared", None)  # {run_dir, train_path, dev_path, counts}
+st.session_state.setdefault("finetune_job", None)  # {process, log_path, output_dir, started_at}
 
 
 def _doc_by_id(doc_id):
@@ -87,9 +99,67 @@ def _next_doc_id():
     return doc_id
 
 
+@st.fragment(run_every="3s")
+def _finetune_status_panel():
+    """Polls the background training subprocess and tails its log. Runs on
+    its own 3s timer so it doesn't force a full-page rerun, and keeps
+    watching a job no matter which nav section is on screen."""
+    job = st.session_state.finetune_job
+    if job is None:
+        st.caption("No fine-tuning job started yet.")
+        return
+
+    process = job["process"]
+    returncode = process.poll()
+    elapsed_min = (time.time() - job["started_at"]) / 60
+    log_text = finetune_tail(job["log_path"]) or "(no output yet)"
+
+    if returncode is None:
+        with st.status(f"Training running — {elapsed_min:.1f} min elapsed", state="running", expanded=True):
+            st.code(log_text, language=None, height=320)
+        if st.button("Stop job", icon=":material/stop_circle:", key="finetune_stop_btn"):
+            process.terminate()
+            st.rerun()
+
+    elif returncode == 0:
+        with st.status(f"Training finished in {elapsed_min:.1f} min", state="complete", expanded=True):
+            st.code(log_text, language=None, height=320)
+        out_dir = job["output_dir"]
+        if model_ready(out_dir):
+            saved_path = model_dir(out_dir)
+            st.success(f"Model saved to `{saved_path}`")
+            st.code(
+                f'return FCoref(device=device, model_name_or_path="{saved_path}")',
+                language="python",
+            )
+            st.caption(
+                "Paste that into load_model() in utils/inference.py to try it on new abstracts, "
+                "then restart the app."
+            )
+        else:
+            st.warning(
+                "Training finished but no checkpoint was saved — dev F1 likely never improved. "
+                "Check the log above; try a lower eval steps or more epochs on the next run."
+            )
+        if st.button("Clear", icon=":material/refresh:", key="finetune_clear_done_btn"):
+            st.session_state.finetune_job = None
+            st.rerun()
+
+    else:
+        with st.status(f"Training failed (exit code {returncode})", state="error", expanded=True):
+            st.code(log_text, language=None, height=320)
+        if st.button("Clear", icon=":material/refresh:", key="finetune_clear_failed_btn"):
+            st.session_state.finetune_job = None
+            st.rerun()
+
+
 # --- Sidebar: navigation + abstract picker ---
 with st.sidebar:
     st.header("Coreference dashboard")
+    model_label = active_model_label()
+    model_icon = ":material/model_training:" if MODEL_NAME_OR_PATH else ":material/smart_toy:"
+    model_help = MODEL_NAME_OR_PATH or "The default biu-nlp/f-coref checkpoint. Set MODEL_NAME_OR_PATH in utils/inference.py to switch."
+    st.caption(f"{model_icon} {model_label}", help=model_help)
 
     for section, icon in NAV_SECTIONS:
         is_current = section == st.session_state.nav_section
@@ -416,6 +486,109 @@ if section == "Run inference":
                 ):
                     remove_documents([d["id"] for d in to_remove])
                     st.rerun()
+
+elif section == "Fine-tune":
+    st.caption(
+        "Fine-tune fastcoref on the corrections you've made so far, without leaving the dashboard. "
+    )
+
+    total_docs = len(st.session_state.documents)
+    if total_docs == 0:
+        st.info("No abstracts processed yet — go to Run inference first.")
+    else:
+        job = st.session_state.finetune_job
+        job_running = job is not None and job["process"].poll() is None
+
+        st.subheader("1. Prepare training data")
+        st.caption(
+            f"{total_docs} processed abstract(s) available. Your corrected clusters become the "
+            "gold training data; a held-out slice is set aside as dev — never trained on, used "
+            "only to pick the best checkpoint during training."
+        )
+        dev_n = st.number_input(
+            "Dev set size", min_value=1, max_value=max(1, total_docs - 1),
+            value=min(50, max(1, total_docs // 5)), step=1, key="finetune_dev_n",
+            help="Docs held out to score checkpoints during training — never trained on.",
+        )
+        if st.button(
+            "Prepare data", icon=":material/dataset:", width="stretch", disabled=job_running,
+        ):
+            run_id = time.strftime("%Y%m%d-%H%M%S")
+            run_dir = RUNS_DIR / run_id
+            records = export_finetuning_records(use_corrected=True)
+            paths, counts = prepare_split(records, run_dir, dev_n=int(dev_n))
+            st.session_state.finetune_prepared = {
+                "run_id": run_id,
+                "run_dir": run_dir,
+                "train_path": paths["train"],
+                "dev_path": paths["dev"],
+                "counts": counts,
+            }
+
+        prepared = st.session_state.finetune_prepared
+        if prepared:
+            st.success(
+                f'Ready: {prepared["counts"]["train"]} train / {prepared["counts"]["dev"]} dev '
+                f'— saved under finetune_runs/{prepared["run_id"]}'
+            )
+            if prepared["counts"]["train"] < 50:
+                st.caption(
+                    "Small training set — fine-tuning can still nudge the model, but don't expect "
+                    "much until you've corrected more abstracts."
+                )
+
+        st.divider()
+        st.subheader("2. Fine-tune")
+        with st.expander("Training settings", icon=":material/tune:"):
+            settings_cols = st.columns(3)
+            with settings_cols[0]:
+                base_model = st.text_input(
+                    "Base model", value="biu-nlp/f-coref", key="finetune_base_model",
+                    help="Same default utils/inference.py uses. Use biu-nlp/lingmess-coref if the "
+                    "dashboard is switched to LingMess.",
+                )
+            with settings_cols[1]:
+                epochs = st.number_input(
+                    "Epochs", min_value=1.0, max_value=20.0, value=3.0, step=1.0, key="finetune_epochs",
+                    help="Small datasets overfit fast — watch dev F1 in the log rather than raising this blindly.",
+                )
+            with settings_cols[2]:
+                learning_rate = st.number_input(
+                    "Learning rate", min_value=1e-6, max_value=1e-3, value=1e-5,
+                    step=1e-6, format="%.1e", key="finetune_lr",
+                )
+            eval_steps = st.number_input(
+                "Eval steps", min_value=1, max_value=500, value=20, step=1, key="finetune_eval_steps",
+                help="How often (in training steps) to check dev F1 and save on a new best. Keep this "
+                "low for small datasets — a whole run can finish in fewer steps than the library's "
+                "own default of 500, in which case eval never fires and nothing gets saved.",
+            )
+
+        if job_running:
+            st.caption("A fine-tuning job is already running below — wait for it or stop it first.")
+        elif not prepared:
+            st.caption("Prepare training data above before starting a run.")
+
+        if st.button(
+            "Start fine-tuning", icon=":material/rocket_launch:", type="primary",
+            disabled=job_running or not prepared,
+        ):
+            process, log_path = start_finetune_job(
+                prepared["train_path"], prepared["dev_path"], prepared["run_dir"],
+                model_name_or_path=base_model, epochs=epochs, learning_rate=learning_rate,
+                eval_steps=int(eval_steps),
+            )
+            st.session_state.finetune_job = {
+                "process": process,
+                "log_path": log_path,
+                "output_dir": prepared["run_dir"],
+                "started_at": time.time(),
+            }
+            st.rerun()
+
+        st.divider()
+        st.subheader("3. Progress")
+        _finetune_status_panel()
 
 elif doc is None:
     st.info("Go to 'Run inference' in the sidebar to add a file or URL first.")
