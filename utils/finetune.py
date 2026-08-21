@@ -112,3 +112,17 @@ def model_dir(output_dir) -> Path:
 
 def model_ready(output_dir) -> bool:
     return (model_dir(output_dir) / "config.json").exists()
+
+
+def load_finetune_jsonl(raw_bytes: bytes) -> dict:
+    """Parse one of the dashboard's own exported JSONL files
+    (export_finetuning_records' {id, label, text, clusters} shape, in
+    utils/session.py) into {doc_id: record}. Shared by the Metrics tab's
+    model-comparison tool and scripts/finetune/compare_models.py."""
+    out = {}
+    for line in raw_bytes.decode("utf-8").splitlines():
+        line = line.strip()
+        if line:
+            row = json.loads(line)
+            out[row["id"]] = row
+    return out

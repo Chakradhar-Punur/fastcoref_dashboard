@@ -26,6 +26,17 @@ def load_model():
     return FCoref(device=device)
 
 
+@st.cache_resource(show_spinner=False)
+def load_comparison_model(model_name_or_path: str):
+    """A second, independently-cached model slot — keyed by path, unlike
+    load_model()'s single always-active slot — used only by the Metrics
+    tab's "compare against another model" tool. Keeps that comparison from
+    evicting or fighting over memory with the model actually serving Run
+    inference."""
+    device = "mps" if torch.backends.mps.is_available() else "cpu"
+    return FCoref(device=device, model_name_or_path=model_name_or_path)
+
+
 def run_inference(text: str):
     model = load_model()
 

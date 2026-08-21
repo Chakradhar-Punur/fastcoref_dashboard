@@ -18,6 +18,7 @@ from utils.constants import NEW_SINGLETON, STATUS_OPTIONS
 from utils.clusters import cluster_label, derive_clusters
 from utils.finetune import (
     RUNS_DIR,
+    load_finetune_jsonl,
     model_dir,
     model_ready,
     prepare_split,
@@ -30,10 +31,15 @@ from utils.gold_compare import (
     load_llm_gold_jsonl,
     match_clusters_to_gold,
 )
-from utils.inference import MODEL_NAME_OR_PATH, active_model_label, run_inference
+from utils.inference import MODEL_NAME_OR_PATH, active_model_label, load_comparison_model, run_inference
 from utils.mention_selector import mention_click_selector
 from utils.rendering import mention_context
-from utils.scoring import aggregate_pairwise_prf, compute_gold_score, compute_pairwise_prf
+from utils.scoring import (
+    aggregate_pairwise_prf,
+    clusters_to_mentions,
+    compute_gold_score,
+    compute_pairwise_prf,
+)
 from utils.session import (
     add_mention,
     clear_status_widget_keys,
@@ -78,6 +84,7 @@ st.session_state.setdefault("csv_processed_count", 0)  # rows already batched in
 st.session_state.setdefault("csv_data", None)  # parsed CSV, kept independent of the uploader widget
 st.session_state.setdefault("finetune_prepared", None)  # {run_dir, train_path, dev_path, counts}
 st.session_state.setdefault("finetune_job", None)  # {process, log_path, output_dir, started_at}
+st.session_state.setdefault("cmp_result", None)  # last "Compare against another model" run
 
 
 def _doc_by_id(doc_id):
@@ -97,6 +104,204 @@ def _next_doc_id():
     doc_id = st.session_state.next_new_doc_id
     st.session_state.next_new_doc_id += 1
     return doc_id
+
+
+def _model_comparison_tool():
+    """The Metrics tab's 'Compare against another model' expander. Works
+    purely from two uploaded JSONL files — independent of whatever's
+    currently loaded in this session — so it's called both when abstracts
+    are loaded (nested in the normal Metrics section) and when none are
+    (Metrics would otherwise be unreachable at all, same as every other
+    per-document section, until something's been run)."""
+    with st.expander(":material/compare_arrows: Compare against another model", icon=":material/model_training:"):
+        st.caption(
+            "Works from uploaded files, independent of the abstracts currently loaded in "
+            "this session — upload the dashboard's own exported JSONL "
+            "(export_finetuning_records' shape: one JSON object per abstract, "
+            "`{id, label, text, clusters}`)."
+        )
+        cmp_mode = st.segmented_control(
+            "Mode",
+            ["Score against gold", "Direct agreement (no gold needed)"],
+            key="cmp_mode", default="Score against gold",
+        ) or "Score against gold"
+        cmp_agreement_mode = cmp_mode.startswith("Direct")
+        st.caption(
+            "Scores both models against your corrections — tells you which is more "
+            "*accurate*. Needs those abstracts actually corrected first (an abstract still "
+            "identical to its own prediction trivially scores 1.0, which isn't real signal)."
+            if not cmp_agreement_mode else
+            "No corrections needed — just measures how much the two models' raw predictions "
+            "*agree* with each other. Agreement isn't accuracy: they can agree and both be "
+            "wrong, or disagree with either one right. Useful to sanity-check that fine-tuning "
+            "changed anything at all, or to find which abstracts are worth correcting first "
+            "(the ones where the two models disagree)."
+        )
+
+        cmp_cols = st.columns(2) if not cmp_agreement_mode else [st.container()]
+        cmp_gold_file = None
+        if not cmp_agreement_mode:
+            with cmp_cols[0]:
+                cmp_gold_file = st.file_uploader(
+                    "Corrected clusters (gold) JSONL", type=["jsonl"], key="cmp_gold_uploader"
+                )
+        with cmp_cols[-1]:
+            cmp_pred_file = st.file_uploader(
+                "Predicted clusters to compare (e.g. fine-tuned) JSONL", type=["jsonl"], key="cmp_pred_uploader"
+            )
+
+        range_cols = st.columns(2)
+        with range_cols[0]:
+            cmp_min_id = st.number_input(
+                "Min doc id (inclusive)", min_value=0, value=0, step=1, key="cmp_min_id",
+                help="Doc ids are assigned once, in order, for the life of a session — e.g. if the "
+                "first 150 abstracts ran on the base model and the rest on a fine-tuned model, "
+                "set this to 150 to compare just that later batch.",
+            )
+        with range_cols[1]:
+            cmp_max_id_raw = st.text_input(
+                "Max doc id (inclusive, blank = no limit)", value="", key="cmp_max_id",
+            )
+        cmp_base_model_path = st.text_input(
+            "Base model to compare against", value="biu-nlp/f-coref", key="cmp_base_model",
+            help="Run fresh on the selected abstracts' text. The model that produced the "
+            "'predicted clusters' file is never reloaded — its output is read straight from that file.",
+        )
+
+        if st.button(
+            "Run comparison", icon=":material/compare_arrows:", type="primary",
+            disabled=cmp_pred_file is None or (not cmp_agreement_mode and cmp_gold_file is None),
+        ):
+            cmp_max_id = None
+            cmp_id_error = False
+            if cmp_max_id_raw.strip():
+                try:
+                    cmp_max_id = int(cmp_max_id_raw)
+                except ValueError:
+                    st.error("Max doc id must be a whole number, or blank.")
+                    cmp_id_error = True
+
+            if not cmp_id_error:
+                cmp_pred_by_id = load_finetune_jsonl(cmp_pred_file.getvalue())
+                # Agreement mode has no separate gold file — the predicted-clusters file
+                # already carries "text" too, so it doubles as the source of abstract text.
+                cmp_gold_by_id = cmp_pred_by_id if cmp_agreement_mode else load_finetune_jsonl(cmp_gold_file.getvalue())
+                cmp_doc_ids = sorted(
+                    i for i in (set(cmp_gold_by_id) & set(cmp_pred_by_id))
+                    if i >= cmp_min_id and (cmp_max_id is None or i <= cmp_max_id)
+                )
+                if not cmp_doc_ids:
+                    st.warning(
+                        f"No documents in both files with id in [{cmp_min_id}, {cmp_max_id or 'inf'}] — "
+                        f"gold has {len(cmp_gold_by_id)} doc(s), predicted has {len(cmp_pred_by_id)}. "
+                        "Check the id range, or that both files came from the same session."
+                    )
+                else:
+                    with st.spinner(
+                        f"Running {cmp_base_model_path} on {len(cmp_doc_ids)} abstract(s) — "
+                        "this can take a minute or two..."
+                    ):
+                        cmp_base_model = load_comparison_model(cmp_base_model_path)
+                        cmp_texts = [cmp_gold_by_id[i]["text"] for i in cmp_doc_ids]
+                        cmp_base_preds = cmp_base_model.predict(texts=cmp_texts)
+
+                    cmp_base_prfs, cmp_pred_prfs, cmp_rows = [], [], []
+                    for cmp_doc_id, cmp_base_pred in zip(cmp_doc_ids, cmp_base_preds):
+                        cmp_pred_mentions = clusters_to_mentions(cmp_pred_by_id[cmp_doc_id]["clusters"])
+                        cmp_base_mentions = clusters_to_mentions(cmp_base_pred.get_clusters(as_strings=False))
+                        cmp_label = cmp_pred_by_id[cmp_doc_id].get("label", str(cmp_doc_id))[:30]
+
+                        if cmp_agreement_mode:
+                            # Score the two models directly against each other — fine-tuned
+                            # as the reference, base as the "candidate". No third row for the
+                            # uploaded model itself; it trivially agrees with itself at 1.0.
+                            cmp_base_prf = compute_pairwise_prf(cmp_base_mentions, cmp_pred_mentions)
+                            cmp_base_prfs.append(cmp_base_prf)
+                            cmp_rows.append({
+                                "Abstract": cmp_label,
+                                "Agreement Precision": round(cmp_base_prf["precision"], 3),
+                                "Agreement Recall": round(cmp_base_prf["recall"], 3),
+                                "Agreement F1": round(cmp_base_prf["f1"], 3),
+                            })
+                        else:
+                            cmp_gold_mentions = clusters_to_mentions(cmp_gold_by_id[cmp_doc_id]["clusters"])
+                            cmp_base_prf = compute_pairwise_prf(cmp_base_mentions, cmp_gold_mentions)
+                            cmp_pred_prf = compute_pairwise_prf(cmp_pred_mentions, cmp_gold_mentions)
+                            cmp_base_prfs.append(cmp_base_prf)
+                            cmp_pred_prfs.append(cmp_pred_prf)
+                            cmp_rows.append({
+                                "Abstract": cmp_label,
+                                "Base Precision": round(cmp_base_prf["precision"], 3),
+                                "Base Recall": round(cmp_base_prf["recall"], 3),
+                                "Base F1": round(cmp_base_prf["f1"], 3),
+                                "Uploaded-model Precision": round(cmp_pred_prf["precision"], 3),
+                                "Uploaded-model Recall": round(cmp_pred_prf["recall"], 3),
+                                "Uploaded-model F1": round(cmp_pred_prf["f1"], 3),
+                            })
+
+                    # Stashed in session_state, not just rendered inline here, so that
+                    # toggling the F1/Precision/Recall control below doesn't lose the
+                    # result — that control is its own widget, so touching it reruns the
+                    # whole script, and this "Run comparison" button would no longer be
+                    # the thing that triggered the rerun (st.button is only True on the
+                    # run where it was actually clicked) — nothing computed only inside
+                    # this if-block would survive to be rendered.
+                    st.session_state.cmp_result = {
+                        "mode": "agreement" if cmp_agreement_mode else "gold",
+                        "base_agg": aggregate_pairwise_prf(cmp_base_prfs),
+                        "pred_agg": aggregate_pairwise_prf(cmp_pred_prfs) if not cmp_agreement_mode else None,
+                        "rows": cmp_rows,
+                        "doc_ids": cmp_doc_ids,
+                        "base_model_path": cmp_base_model_path,
+                    }
+
+        cmp_result = st.session_state.cmp_result
+        if cmp_result:
+            st.success(
+                f"Compared {len(cmp_result['doc_ids'])} abstract(s) "
+                f"(ids {cmp_result['doc_ids'][0]}-{cmp_result['doc_ids'][-1]})."
+            )
+
+            cmp_base_agg = cmp_result["base_agg"]
+            cmp_metric = st.segmented_control(
+                "Per-abstract metric", ["F1", "Precision", "Recall"],
+                key="cmp_metric_toggle", default="F1",
+            ) or "F1"
+
+            if cmp_result.get("mode", "gold") == "agreement":
+                cb1, cb2, cb3 = st.columns(3)
+                cb1.metric("Precision", f'{cmp_base_agg["precision"]:.3f}')
+                cb2.metric("Recall", f'{cmp_base_agg["recall"]:.3f}')
+                cb3.metric("F1", f'{cmp_base_agg["f1"]:.3f}')
+                st.caption(
+                    f"Agreement between base ({cmp_result['base_model_path']}) and the uploaded "
+                    "predictions — not accuracy, no gold involved. Low agreement means fine-tuning "
+                    "changed real behavior; it doesn't say which model is more correct."
+                )
+                cmp_display_df = pd.DataFrame(cmp_result["rows"])[["Abstract", f"Agreement {cmp_metric}"]]
+            else:
+                cmp_pred_agg = cmp_result["pred_agg"]
+                cmp_result_cols = st.columns(2)
+                with cmp_result_cols[0]:
+                    st.markdown(f"**Base — {cmp_result['base_model_path']}**")
+                    cb1, cb2, cb3 = st.columns(3)
+                    cb1.metric("Precision", f'{cmp_base_agg["precision"]:.3f}')
+                    cb2.metric("Recall", f'{cmp_base_agg["recall"]:.3f}')
+                    cb3.metric("F1", f'{cmp_base_agg["f1"]:.3f}')
+                with cmp_result_cols[1]:
+                    st.markdown("**Uploaded predictions**")
+                    cp1, cp2, cp3 = st.columns(3)
+                    cp1.metric("Precision", f'{cmp_pred_agg["precision"]:.3f}')
+                    cp2.metric("Recall", f'{cmp_pred_agg["recall"]:.3f}')
+                    cp3.metric(
+                        "F1", f'{cmp_pred_agg["f1"]:.3f}',
+                        delta=f'{cmp_pred_agg["f1"] - cmp_base_agg["f1"]:+.3f}',
+                    )
+                cmp_display_df = pd.DataFrame(cmp_result["rows"])[
+                    ["Abstract", f"Base {cmp_metric}", f"Uploaded-model {cmp_metric}"]
+                ]
+
+            st.dataframe(cmp_display_df, width="stretch", hide_index=True)
 
 
 @st.fragment(run_every="3s")
@@ -590,6 +795,13 @@ elif section == "Fine-tune":
         st.subheader("3. Progress")
         _finetune_status_panel()
 
+elif section == "Metrics" and doc is None:
+    # Unlike Correct/View, the model-comparison tool works from uploaded
+    # files alone — no reason to block it behind having abstracts loaded
+    # in this session too.
+    _model_comparison_tool()
+    st.info("Go to 'Run inference' in the sidebar to see per-abstract / aggregate metrics too.")
+
 elif doc is None:
     st.info("Go to 'Run inference' in the sidebar to add a file or URL first.")
 
@@ -649,30 +861,50 @@ else:
             )
             n_exact = sum(1 for m in gold_matches.values() if m and m["f1"] >= 0.999)
             n_flagged_clusters = len(flagged_by_cluster)
+            # What the buttons below will *actually* change — they only ever touch a
+            # cluster still "Unverified" (never overwrite a status you set by hand), but
+            # n_exact/n_flagged_clusters above count every match regardless of status.
+            # Gating "disabled" on those instead keeps the button from staying enabled
+            # (and silently doing nothing) once everything it would affect is done.
+            n_exact_pending = sum(
+                1 for c in clusters
+                if (m := gold_matches.get(c["id"])) and m["f1"] >= 0.999
+                and cluster_status(doc, c["id"]) == "Unverified"
+            )
+            n_flagged_pending = sum(
+                1 for cid in flagged_by_cluster if cluster_status(doc, cid) == "Unverified"
+            )
             st.caption(
                 f":material/compare_arrows: Gold check: {n_exact}/{len(clusters)} cluster(s) exactly "
-                f"match a gold entity · {len(missing_gold)} gold entit(y/ies) fastcoref missed entirely "
-                f"· {n_flagged_clusters} cluster(s) contain a mention that should never be grouped"
+                f"match a gold entity ({n_exact_pending} not yet marked) · {len(missing_gold)} gold "
+                f"entit(y/ies) fastcoref missed entirely · {n_flagged_clusters} cluster(s) contain a "
+                f"mention that should never be grouped ({n_flagged_pending} not yet marked)"
             )
             gold_cols = st.columns(2)
             with gold_cols[0]:
                 if st.button(
                     "Auto-mark exact matches Correct", key=f"automarkgold_{doc_id}",
-                    disabled=n_exact == 0, width="stretch",
+                    disabled=n_exact_pending == 0, width="stretch",
                 ):
+                    n_marked = 0
                     for c in clusters:
                         m = gold_matches.get(c["id"])
                         if m and m["f1"] >= 0.999 and cluster_status(doc, c["id"]) == "Unverified":
                             doc["cluster_statuses"][c["id"]] = "Correct"
+                            n_marked += 1
+                    st.toast(f"Marked {n_marked} cluster(s) Correct.", icon=":material/check_circle:")
                     st.rerun()
             with gold_cols[1]:
                 if st.button(
                     "Auto-mark flagged clusters Incorrect", key=f"automarkflagged_{doc_id}",
-                    disabled=n_flagged_clusters == 0, width="stretch",
+                    disabled=n_flagged_pending == 0, width="stretch",
                 ):
+                    n_marked = 0
                     for cid in flagged_by_cluster:
                         if cluster_status(doc, cid) == "Unverified":
                             doc["cluster_statuses"][cid] = "Incorrect"
+                            n_marked += 1
+                    st.toast(f"Marked {n_marked} cluster(s) Incorrect.", icon=":material/flag:")
                     st.rerun()
             if missing_gold:
                 with st.expander(f"{len(missing_gold)} gold entit(y/ies) fastcoref found nothing for"):
@@ -1093,6 +1325,8 @@ else:
                     st.markdown(f"**{labels_by_id[c2['id']]}** · {c2['size']} mentions")
 
     elif section == "Metrics":
+        _model_comparison_tool()
+
         metrics_scope = st.segmented_control(
             "Scope", ["This abstract", "All abstracts"], key="metrics_scope", default="This abstract"
         )

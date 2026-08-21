@@ -11,6 +11,9 @@ JSONL.
   `dev.jsonl` (/ `test.jsonl`).
 - `train.py` — runs `CorefTrainer` on the split and saves the fine-tuned
   model.
+- `compare_models.py` — scores the base model against the fine-tuned model
+  on the same batch of abstracts, against your corrections as gold. See
+  step 5 below.
 
 ## Setup
 
@@ -76,6 +79,30 @@ return FCoref(device=device, model_name_or_path="output/finetuned-abstracts/mode
 Then re-run inference on a batch you *haven't* corrected yet and compare
 its clusters against your gold corrections the same way you already do for
 the base model, to see whether fine-tuning actually helped.
+
+## 5. Compare base vs fine-tuned on the same abstracts
+
+If a batch of abstracts only ever ran through the fine-tuned model (e.g.
+you switched models partway through a longer session), there's no base
+model prediction for them to compare against yet — `compare_models.py`
+runs the base model on those same abstracts' text right now and scores
+both against your corrections:
+
+```bash
+python compare_models.py \
+    --gold corrected_clusters.jsonl \
+    --finetuned-predicted original_clusters.jsonl \
+    --min-id 150   # first id that ran on the fine-tuned model
+```
+
+Both input files are the dashboard's usual "All abstracts" exports
+(**Download corrected clusters** / **Download original (predicted)
+clusters**, from "View corrected & predicted clusters") — they cover the
+whole session, base-model batch and fine-tuned-model batch together;
+`--min-id`/`--max-id` pick out just the fine-tuned batch by document id
+(ids are assigned once, monotonically, for the life of a session — see
+`_next_doc_id` in `app.py`). Add `--verbose` for a per-abstract F1
+breakdown alongside the pooled precision/recall/F1 for each model.
 
 ## Gotchas
 

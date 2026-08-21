@@ -1,3 +1,15 @@
+def clusters_to_mentions(clusters: list) -> list:
+    """[[[start, end], ...], ...] (export_finetuning_records' per-cluster span
+    shape, in utils/session.py) -> the flat {start, end, cluster_id} list
+    compute_pairwise_prf expects. Shared by the Metrics tab's model-comparison
+    tool and scripts/finetune/compare_models.py so the two never drift."""
+    return [
+        {"start": start, "end": end, "cluster_id": cluster_id}
+        for cluster_id, spans in enumerate(clusters)
+        for start, end in spans
+    ]
+
+
 def compute_gold_score(gold_mentions: list, clusters: list):
     """
     Compare a hand-labeled gold mention list for one entity against the
