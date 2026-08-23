@@ -41,7 +41,17 @@
       "mcp__claude-in-chrome__tabs_create_mcp",
       "Bash(pkill -f \"streamlit run app.py --server.port 8502\")",
       "Bash(.venv/bin/python -m py_compile app.py utils/gold_compare.py scripts/llm_extraction/extract_clusters.py scripts/llm_extraction/run_batch.py scripts/llm_extraction/jsonl_to_csv.py)",
-      "Bash(.venv/bin/python -m py_compile scripts/llm_extraction/run_batch.py)"
+      "Bash(.venv/bin/python -m py_compile scripts/llm_extraction/run_batch.py)",
+      "Bash(.venv/bin/python -m py_compile /Users/Chakradhar/fastcoref_dashboard/app.py)",
+      "Bash(.venv/bin/python -m py_compile app.py utils/inference.py utils/finetune.py utils/scoring.py scripts/finetune/compare_models.py)",
+      "Bash(lsof -nP -iTCP:8501 -sTCP:LISTEN)",
+      "Bash(python3 -)",
+      "Bash(.venv/bin/python -m py_compile app.py)",
+      "Bash(cat > *)",
+      "Bash(python3 /tmp/diagnose_gold2.py ~/Downloads/corrected_clusters.jsonl ~/Downloads/original_clusters.jsonl 150)",
+      "Bash(.venv/bin/python -m py_compile /Users/Chakradhar/fastcoref_dashboard/scripts/finetune/compare_models.py)",
+      "Bash(.venv/bin/python scripts/finetune/compare_models.py --finetuned-predicted /tmp/agreetest/finetuned_predicted.jsonl --min-id 150 --verbose)",
+      "Bash(.venv/bin/python -m py_compile /Users/Chakradhar/fastcoref_dashboard/app.py /Users/Chakradhar/fastcoref_dashboard/utils/comparison_history.py)"
     ]
   }
 }

@@ -16,6 +16,7 @@ import streamlit as st
 
 from utils.constants import NEW_SINGLETON, STATUS_OPTIONS
 from utils.clusters import cluster_label, derive_clusters
+from utils.comparison_history import load_comparison_history, log_comparison_result
 from utils.finetune import (
     RUNS_DIR,
     load_finetune_jsonl,
@@ -302,6 +303,67 @@ def _model_comparison_tool():
                 ]
 
             st.dataframe(cmp_display_df, width="stretch", hide_index=True)
+
+            if cmp_result.get("mode", "gold") == "gold":
+                log_cols = st.columns([3, 1])
+                with log_cols[0]:
+                    cmp_log_label = st.text_input(
+                        "Label this run (e.g. which model version, which batch)",
+                        value=f"ids {cmp_result['doc_ids'][0]}-{cmp_result['doc_ids'][-1]}",
+                        key="cmp_log_label",
+                    )
+                with log_cols[1]:
+                    st.write("")  # align button with the text input
+                    if st.button("Log this result", icon=":material/history:", width="stretch"):
+                        log_comparison_result(
+                            cmp_log_label, cmp_result["doc_ids"], cmp_result["base_model_path"],
+                            cmp_base_agg, cmp_result["pred_agg"],
+                        )
+                        st.toast("Logged to comparison_history.csv", icon=":material/check_circle:")
+
+        st.divider()
+        cmp_history = load_comparison_history()
+        with st.expander(f":material/history: Comparison history ({len(cmp_history)} logged)"):
+            if not cmp_history:
+                st.caption(
+                    "Nothing logged yet — run a \"Score against gold\" comparison above and click "
+                    "\"Log this result\" to start tracking accuracy batch over batch."
+                )
+            else:
+                cmp_hist_df = pd.DataFrame(cmp_history)
+                for col in ["base_f1", "pred_f1", "base_precision", "base_recall", "pred_precision", "pred_recall"]:
+                    cmp_hist_df[col] = cmp_hist_df[col].astype(float)
+
+                cmp_hist_metric = st.segmented_control(
+                    "History metric", ["F1", "Precision", "Recall"],
+                    key="cmp_hist_metric_toggle", default="F1",
+                ) or "F1"
+                cmp_hist_metric_lower = cmp_hist_metric.lower()
+                cmp_hist_base_col = f"base_{cmp_hist_metric_lower}"
+                cmp_hist_pred_col = f"pred_{cmp_hist_metric_lower}"
+
+                cmp_hist_fig = go.Figure()
+                cmp_hist_fig.add_trace(go.Scatter(
+                    x=cmp_hist_df["label"], y=cmp_hist_df[cmp_hist_base_col],
+                    mode="lines+markers", name=f"Base {cmp_hist_metric}", line=dict(width=3), marker=dict(size=8),
+                ))
+                cmp_hist_fig.add_trace(go.Scatter(
+                    x=cmp_hist_df["label"], y=cmp_hist_df[cmp_hist_pred_col],
+                    mode="lines+markers", name=f"Fine-tuned {cmp_hist_metric}", line=dict(width=3), marker=dict(size=8),
+                ))
+                cmp_hist_fig.update_layout(
+                    xaxis_title="Run", yaxis_title=cmp_hist_metric, height=360,
+                    template="plotly_dark" if st.get_option("theme.base") == "dark" else "plotly",
+                )
+                st.plotly_chart(cmp_hist_fig, width="stretch")
+
+                st.dataframe(
+                    cmp_hist_df[[
+                        "logged_at", "label", "num_docs", "min_id", "max_id",
+                        cmp_hist_base_col, cmp_hist_pred_col,
+                    ]],
+                    width="stretch", hide_index=True,
+                )
 
 
 @st.fragment(run_every="3s")

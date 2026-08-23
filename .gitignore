@@ -7,4 +7,5 @@ __pycache__/
 scripts/llm_extraction/.env
 ai_abstracts.csv
 finetune_runs/
+comparison_history.csv
 cache/
