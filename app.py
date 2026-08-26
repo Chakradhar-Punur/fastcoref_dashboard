@@ -212,6 +212,11 @@ def _model_comparison_tool():
                         cmp_base_mentions = clusters_to_mentions(cmp_base_pred.get_clusters(as_strings=False))
                         cmp_label = cmp_pred_by_id[cmp_doc_id].get("label", str(cmp_doc_id))[:30]
 
+                        # +1 to match the sidebar's 1-indexed "Go to abstract #" box, which is
+                        # what you'd actually type in to jump to this abstract — doc ids
+                        # themselves (what's used for --min-id/--max-id here) are 0-indexed.
+                        cmp_abstract_num = cmp_doc_id + 1
+
                         if cmp_agreement_mode:
                             # Score the two models directly against each other — fine-tuned
                             # as the reference, base as the "candidate". No third row for the
@@ -219,6 +224,7 @@ def _model_comparison_tool():
                             cmp_base_prf = compute_pairwise_prf(cmp_base_mentions, cmp_pred_mentions)
                             cmp_base_prfs.append(cmp_base_prf)
                             cmp_rows.append({
+                                "Abstract #": cmp_abstract_num,
                                 "Abstract": cmp_label,
                                 "Agreement Precision": round(cmp_base_prf["precision"], 3),
                                 "Agreement Recall": round(cmp_base_prf["recall"], 3),
@@ -231,6 +237,7 @@ def _model_comparison_tool():
                             cmp_base_prfs.append(cmp_base_prf)
                             cmp_pred_prfs.append(cmp_pred_prf)
                             cmp_rows.append({
+                                "Abstract #": cmp_abstract_num,
                                 "Abstract": cmp_label,
                                 "Base Precision": round(cmp_base_prf["precision"], 3),
                                 "Base Recall": round(cmp_base_prf["recall"], 3),
@@ -279,7 +286,7 @@ def _model_comparison_tool():
                     "predictions — not accuracy, no gold involved. Low agreement means fine-tuning "
                     "changed real behavior; it doesn't say which model is more correct."
                 )
-                cmp_display_df = pd.DataFrame(cmp_result["rows"])[["Abstract", f"Agreement {cmp_metric}"]]
+                cmp_display_df = pd.DataFrame(cmp_result["rows"])[["Abstract #", "Abstract", f"Agreement {cmp_metric}"]]
             else:
                 cmp_pred_agg = cmp_result["pred_agg"]
                 cmp_result_cols = st.columns(2)
@@ -299,7 +306,7 @@ def _model_comparison_tool():
                         delta=f'{cmp_pred_agg["f1"] - cmp_base_agg["f1"]:+.3f}',
                     )
                 cmp_display_df = pd.DataFrame(cmp_result["rows"])[
-                    ["Abstract", f"Base {cmp_metric}", f"Uploaded-model {cmp_metric}"]
+                    ["Abstract #", "Abstract", f"Base {cmp_metric}", f"Uploaded-model {cmp_metric}"]
                 ]
 
             st.dataframe(cmp_display_df, width="stretch", hide_index=True)
