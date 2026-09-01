@@ -40,7 +40,7 @@ from extract_clusters import DEFAULT_MODEL, build_user_content, extract_clusters
 # for exact current rates and your actual invoice for exact spend.
 MODEL_PRICE_PER_MTOK = {
     "claude-opus-5": (5.00, 25.00),
-    "claude-sonnet-5": (3.00, 15.00),
+    "claude-sonnet-5": (2.00, 10.00),
     "claude-haiku-4-5": (1.00, 5.00),
 }
 
@@ -189,6 +189,16 @@ def main():
                     continue
 
                 parsed = result.parsed_output
+                if parsed is None:
+                    # Hit max_tokens (or otherwise failed to parse) before producing
+                    # structured output — not a raised exception, so handle it here.
+                    print(
+                        f"  [{row_num}] ERROR: no parsed output (stop_reason={result.stop_reason}); "
+                        "skipping row",
+                        file=sys.stderr,
+                    )
+                    n_errors += 1
+                    continue
                 clusters = parsed.clusters
                 record = {
                     "abstract_num": row_num,
@@ -228,9 +238,11 @@ def main():
             price = MODEL_PRICE_PER_MTOK.get(args.model)
             if price:
                 in_price, out_price = price
-                uncached_input = total_input_tokens - total_cache_read
+                # usage.input_tokens from the API is already exclusive of cache
+                # read/creation tokens (separate counters) — don't subtract
+                # cache_read from it again, or the "uncached" portion goes negative.
                 cost = (
-                    uncached_input / 1_000_000 * in_price
+                    total_input_tokens / 1_000_000 * in_price
                     + total_cache_read / 1_000_000 * (in_price * 0.1)
                     + total_output_tokens / 1_000_000 * out_price
                 )

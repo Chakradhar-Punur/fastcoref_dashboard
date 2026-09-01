@@ -152,6 +152,14 @@ def extract_clusters(
     response = client.messages.parse(
         model=model,
         max_tokens=4096,
+        # This is a well-specified extraction task (verbatim spans, fixed
+        # schema) with no need for open-ended reasoning. On claude-sonnet-5
+        # (and other current models) thinking runs adaptive by default, and
+        # on a handful of abstracts it consumed the entire max_tokens budget
+        # on thinking before emitting any structured output, leaving
+        # parsed_output as None. Disabling it avoids that failure mode and
+        # the extra thinking-token cost.
+        thinking={"type": "disabled"},
         # The system prompt is byte-identical across every call in the batch —
         # caching it means every abstract after the first pays ~0.1x for it
         # instead of full price. See shared/prompt-caching.md in the claude-api skill.

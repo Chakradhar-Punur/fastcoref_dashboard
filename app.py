@@ -451,7 +451,27 @@ with st.sidebar:
     else:
         total_docs = len(st.session_state.documents)
         done_docs = sum(1 for d in st.session_state.documents if _doc_is_done(d))
-        st.progress(done_docs / total_docs, text=f"{done_docs} of {total_docs} abstracts done")
+        # "Verified" here means every cluster has a non-"Unverified" status — an
+        # abstract with zero clusters counts automatically (nothing to check), even
+        # if you haven't opened it yet. So this can run ahead of your sequential
+        # position (the "Abstract N of total" caption below) if a not-yet-visited
+        # abstract happens to have no clusters at all — that's expected, not a bug.
+        st.progress(done_docs / total_docs, text=f"{done_docs} of {total_docs} abstracts verified")
+
+        zero_cluster_docs = [
+            (i, d) for i, d in enumerate(st.session_state.documents)
+            if not {m["cluster_id"] for m in d["mentions"]}
+        ]
+        if zero_cluster_docs:
+            with st.expander(f"{len(zero_cluster_docs)} abstract(s) with no clusters (auto-verified)"):
+                for i, d in zero_cluster_docs:
+                    if st.button(
+                        f"#{i + 1} — {d['label'][:50]}",
+                        key=f"jumpzero_{d['id']}", width="stretch",
+                    ):
+                        st.session_state.current_doc_id = d["id"]
+                        st.session_state.current_cluster_id = None
+                        st.rerun()
 
         doc_ids = [d["id"] for d in st.session_state.documents]
         if st.session_state.current_doc_id not in doc_ids:
@@ -919,6 +939,18 @@ else:
             gold_data = gold_store.get("by_num", {}).get(doc["csv_row_num"])
         else:
             gold_data = gold_store.get("by_title", {}).get(doc["label"].strip().lower())
+        if gold_store and not gold_data:
+            # Previously a silent no-op — the whole "Gold check" block just never
+            # appeared, with nothing telling you why. Surface the actual lookup key
+            # so a row-number mismatch (or a doc with no csv_row_num at all) is
+            # visible immediately instead of requiring a code-level investigation.
+            st.caption(
+                f":material/warning: No LLM gold match for this abstract — looked up "
+                f"csv_row_num={doc.get('csv_row_num')!r} in the uploaded gold file "
+                f"({gold_store.get('count', 0)} entries, by_num keys "
+                f"{min(gold_store.get('by_num', {}), default='—')}-"
+                f"{max(gold_store.get('by_num', {}), default='—')})."
+            )
         gold_entities = gold_data["clusters"] if gold_data else None
         gold_matches = {}
         flagged_by_cluster = {}
@@ -1423,40 +1455,47 @@ else:
 
             with st.expander("Clusters needing attention", icon=":material/flag:"):
                 review_filter = st.segmented_control(
-                    "Show", ["Singletons", "Incorrect", "Unsure"],
+                    "Show", ["Singletons", "Incorrect", "Unsure", "Unverified"],
                     key="review_filter", default="Singletons",
                 )
                 review_filter = review_filter or "Singletons"
 
                 flagged = []
-                for d, cs in zip(all_docs, all_clusters):
+                for i, (d, cs) in enumerate(zip(all_docs, all_clusters)):
                     for c in cs:
                         status = cluster_status(d, c["id"])
                         is_match = (
                             (review_filter == "Singletons" and c["size"] == 1)
                             or (review_filter == "Incorrect" and status == "Incorrect")
                             or (review_filter == "Unsure" and status == "Unsure")
+                            or (review_filter == "Unverified" and status == "Unverified")
                         )
                         if is_match:
-                            flagged.append((d, c))
+                            flagged.append((i, d, c))
 
                 if not flagged:
                     st.caption(f"No {review_filter.lower()} clusters found.")
                 else:
-                    st.caption(f"{len(flagged)} cluster(s) found.")
-                    for d, c in flagged:
-                        row_cols = st.columns([3, 5, 2])
+                    by_doc = {}
+                    for i, d, c in flagged:
+                        by_doc.setdefault(d["id"], (i, d, []))[2].append(c)
+
+                    st.caption(f"{len(flagged)} cluster(s) across {len(by_doc)} abstract(s).")
+                    for i, d, cs in by_doc.values():
+                        row_cols = st.columns([1, 4, 2, 2])
                         with row_cols[0]:
-                            st.caption(d["label"][:40])
+                            st.caption(f"#{i + 1}")
                         with row_cols[1]:
-                            st.markdown(f"Cluster {c['id']} — {cluster_label(c)}")
+                            st.caption(d["label"][:60])
                         with row_cols[2]:
+                            st.markdown(f"{len(cs)} cluster(s)")
+                        with row_cols[3]:
                             if st.button(
-                                "Go to cluster", icon=":material/open_in_new:", width="stretch",
-                                key=f"gotocluster_{d['id']}_{c['id']}",
+                                "Go to abstract", icon=":material/open_in_new:", width="stretch",
+                                key=f"gotoabstract_{d['id']}_{review_filter}",
                             ):
                                 st.session_state.current_doc_id = d["id"]
-                                st.session_state.current_cluster_id = c["id"]
+                                st.session_state.current_cluster_id = cs[0]["id"]
                                 st.session_state.nav_section = "Correct"
                                 st.rerun()
 
