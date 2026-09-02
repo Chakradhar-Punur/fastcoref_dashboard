@@ -1,0 +1,202 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8" />
+<style>
+  html, body {
+    margin: 0;
+    padding: 0;
+  }
+  .coref-doc {
+    max-height: 560px;
+    overflow-y: auto;
+    line-height: 1.6;
+    font-size: 14px;
+    white-space: pre-wrap;
+    padding: 8px;
+    user-select: text;
+    -webkit-user-select: text;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  }
+  .coref-mention {
+    background: #f7b955;
+    color: #1a1300;
+    border-radius: 3px;
+    padding: 0 2px;
+    cursor: pointer;
+    user-select: text;
+    -webkit-user-select: text;
+  }
+  .coref-mention.selected {
+    background: #2f6fed;
+    color: #ffffff;
+    box-shadow: 0 0 0 2px #2f6fed;
+  }
+  .coref-mention.dragging {
+    outline: 2px dashed #2f6fed;
+    outline-offset: 1px;
+  }
+</style>
+</head>
+<body>
+<div id="coref-mention-root"></div>
+<script>
+// Minimal hand-rolled implementation of the Streamlit bidirectional
+// component protocol (the same postMessage contract that the
+// streamlit-component-lib npm package wraps), since that package isn't
+// available here and this component has no JS build step.
+(function () {
+  "use strict";
+
+  function sendToStreamlit(type, extra) {
+    var payload = Object.assign({ isStreamlitMessage: true, type: type }, extra || {})
+    window.parent.postMessage(payload, "*")
+  }
+
+  function setComponentValue(value) {
+    sendToStreamlit("streamlit:setComponentValue", { value: value })
+  }
+
+  function setFrameHeight() {
+    var height = document.body.scrollHeight
+    sendToStreamlit("streamlit:setFrameHeight", { height: height })
+  }
+
+  var root = document.getElementById("coref-mention-root")
+  var isDragging = false
+  var dragTouched = new Set()
+
+  function escapeHtml(s) {
+    return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+  }
+
+  function clearDragStyles(doc) {
+    doc.querySelectorAll(".coref-mention.dragging").forEach(function (el) {
+      el.classList.remove("dragging")
+    })
+  }
+
+  function render(args) {
+    var text = args.text || ""
+    var mentions = args.mentions || []
+    var selectedSet = new Set((args.selected || []).map(function (p) { return p[0] + "-" + p[1] }))
+
+    var spans = mentions.slice().sort(function (a, b) { return a[0] - b[0] })
+
+    var html = ""
+    var cursor = 0
+    for (var i = 0; i < spans.length; i++) {
+      var start = spans[i][0]
+      var end = spans[i][1]
+      if (start < cursor) continue
+      html += escapeHtml(text.slice(cursor, start))
+      var spanKey = start + "-" + end
+      var isSelected = selectedSet.has(spanKey)
+      html += '<mark class="coref-mention' + (isSelected ? " selected" : "") + '" data-start="' + start + '" data-end="' + end + '" tabindex="0" role="button" aria-pressed="' + isSelected + '">' + escapeHtml(text.slice(start, end)) + "</mark>"
+      cursor = end
+    }
+    html += escapeHtml(text.slice(cursor))
+
+    // Reuse the same scrollable element across reruns instead of recreating it —
+    // recreating it resets its scroll position to the top on every click.
+    var doc = root.querySelector(".coref-doc")
+    if (!doc) {
+      doc = document.createElement("div")
+      doc.className = "coref-doc"
+      root.appendChild(doc)
+    }
+    var scrollTop = doc.scrollTop
+    doc.innerHTML = html
+    doc.scrollTop = scrollTop
+
+    var emit = function (nextSet) {
+      setComponentValue(Array.from(nextSet).map(function (k) {
+        return k.split("-").map(Number)
+      }))
+    }
+
+    doc.querySelectorAll(".coref-mention").forEach(function (el) {
+      var spanKey = el.dataset.start + "-" + el.dataset.end
+      el.onmouseenter = function () {
+        if (isDragging) {
+          dragTouched.add(spanKey)
+          el.classList.add("dragging")
+        }
+      }
+      el.onkeydown = function (e) {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault()
+          var next = new Set(selectedSet)
+          if (next.has(spanKey)) next.delete(spanKey)
+          else next.add(spanKey)
+          emit(next)
+        }
+      }
+    })
+
+    // Click-and-drag: press on a mention, sweep across the document, release —
+    // every mention the pointer passed over gets added to the selection. A plain
+    // click (the pointer never enters a second mention) still just toggles the one
+    // mention pressed, same as before. A press that does NOT start on a mention
+    // (plain text, whitespace) is left alone entirely so the browser's normal
+    // text selection kicks in — this is what lets the reviewer select and copy
+    // text out of the document.
+    doc.onmousedown = function (e) {
+      var startMark = e.target.closest(".coref-mention")
+      if (!startMark) return
+
+      isDragging = true
+      dragTouched = new Set()
+      var spanKey = startMark.dataset.start + "-" + startMark.dataset.end
+      dragTouched.add(spanKey)
+      startMark.classList.add("dragging")
+      e.preventDefault()
+    }
+
+    // Attach to window (not just the doc container) so releasing outside it still
+    // finalizes the drag. Remove any listener from a previous render first — the
+    // element persists across reruns, so re-adding without removing would leak a
+    // new stale listener (with a stale closure) on every single render.
+    if (root._mouseUpHandler) {
+      window.removeEventListener("mouseup", root._mouseUpHandler)
+    }
+    var onMouseUp = function () {
+      if (!isDragging) return
+      isDragging = false
+      clearDragStyles(doc)
+
+      if (dragTouched.size === 0) {
+        dragTouched = new Set()
+        return
+      }
+
+      var next = new Set(selectedSet)
+      if (dragTouched.size === 1) {
+        var only = dragTouched.values().next().value
+        if (next.has(only)) next.delete(only)
+        else next.add(only)
+      } else {
+        dragTouched.forEach(function (k) { next.add(k) })
+      }
+      emit(next)
+      dragTouched = new Set()
+    }
+    root._mouseUpHandler = onMouseUp
+    window.addEventListener("mouseup", onMouseUp)
+
+    setFrameHeight()
+  }
+
+  window.addEventListener("message", function (event) {
+    if (!event.data || event.data.type !== "streamlit:render") return
+    render(event.data.args || {})
+  })
+
+  window.addEventListener("resize", setFrameHeight)
+
+  sendToStreamlit("streamlit:componentReady", { apiVersion: 1 })
+  setFrameHeight()
+})()
+</script>
+</body>
+</html>
