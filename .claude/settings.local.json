@@ -51,7 +51,22 @@
       "Bash(python3 /tmp/diagnose_gold2.py ~/Downloads/corrected_clusters.jsonl ~/Downloads/original_clusters.jsonl 150)",
       "Bash(.venv/bin/python -m py_compile /Users/Chakradhar/fastcoref_dashboard/scripts/finetune/compare_models.py)",
       "Bash(.venv/bin/python scripts/finetune/compare_models.py --finetuned-predicted /tmp/agreetest/finetuned_predicted.jsonl --min-id 150 --verbose)",
-      "Bash(.venv/bin/python -m py_compile /Users/Chakradhar/fastcoref_dashboard/app.py /Users/Chakradhar/fastcoref_dashboard/utils/comparison_history.py)"
+      "Bash(.venv/bin/python -m py_compile /Users/Chakradhar/fastcoref_dashboard/app.py /Users/Chakradhar/fastcoref_dashboard/utils/comparison_history.py)",
+      "Bash(pandoc -t markdown \"/Users/Chakradhar/Library/Mobile Documents/com~apple~CloudDocs/Downloads/AI Internship/fastcoref_dashboard_overview.docx\")",
+      "Bash(python3 -c \"import docx\")",
+      "Bash(pip3 show *)",
+      "Read(//Users/Chakradhar/Library/Application Support/Claude/local-agent-mode-sessions/skills-plugin/4d5d0b6f-f79f-4d9c-8e91-922d59d1c424/b39a690c-b7d4-4d99-bc6e-aa47e286ce19/skills/docx/scripts/**)",
+      "Bash(python3 '/Users/Chakradhar/Library/Application Support/Claude/local-agent-mode-sessions/skills-plugin/4d5d0b6f-f79f-4d9c-8e91-922d59d1c424/b39a690c-b7d4-4d99-bc6e-aa47e286ce19/skills/docx/scripts/merge_runs.py' __TRACKED_VAR__/unpacked/)",
+      "Bash(pip3 install *)",
+      "Bash(python3 -m venv /tmp/docxvenv)",
+      "Bash(/tmp/docxvenv/bin/pip install *)",
+      "Bash(/tmp/docxvenv/bin/python3 '/Users/Chakradhar/Library/Application Support/Claude/local-agent-mode-sessions/skills-plugin/4d5d0b6f-f79f-4d9c-8e91-922d59d1c424/b39a690c-b7d4-4d99-bc6e-aa47e286ce19/skills/docx/scripts/merge_runs.py' /private/tmp/claude-501/-Users-Chakradhar-fastcoref-dashboard/4143f486-6847-4c19-9419-8af6dceaeba2/scratchpad/docx_work/unpacked/)",
+      "Bash(python3 /private/tmp/claude-501/-Users-Chakradhar-fastcoref-dashboard/4143f486-6847-4c19-9419-8af6dceaeba2/scratchpad/docx_work/build_insert.py)",
+      "Bash(rm -f ../out.docx)",
+      "Bash(zip -Xrq ../out.docx .)",
+      "Bash(python3 \"/Users/Chakradhar/Library/Application Support/Claude/local-agent-mode-sessions/skills-plugin/4d5d0b6f-f79f-4d9c-8e91-922d59d1c424/b39a690c-b7d4-4d99-bc6e-aa47e286ce19/skills/docx/scripts/office/soffice.py\" --headless --convert-to pdf out.docx)",
+      "Bash(mdfind \"kMDItemFSName == 'soffice'\")",
+      "Bash(python3 - /private/tmp/claude-501/-Users-Chakradhar-fastcoref-dashboard/4143f486-6847-4c19-9419-8af6dceaeba2/scratchpad/docx_work/out.docx)"
     ]
   }
 }
