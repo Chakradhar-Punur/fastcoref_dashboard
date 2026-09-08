@@ -66,7 +66,9 @@
       "Bash(zip -Xrq ../out.docx .)",
       "Bash(python3 \"/Users/Chakradhar/Library/Application Support/Claude/local-agent-mode-sessions/skills-plugin/4d5d0b6f-f79f-4d9c-8e91-922d59d1c424/b39a690c-b7d4-4d99-bc6e-aa47e286ce19/skills/docx/scripts/office/soffice.py\" --headless --convert-to pdf out.docx)",
       "Bash(mdfind \"kMDItemFSName == 'soffice'\")",
-      "Bash(python3 - /private/tmp/claude-501/-Users-Chakradhar-fastcoref-dashboard/4143f486-6847-4c19-9419-8af6dceaeba2/scratchpad/docx_work/out.docx)"
+      "Bash(python3 - /private/tmp/claude-501/-Users-Chakradhar-fastcoref-dashboard/4143f486-6847-4c19-9419-8af6dceaeba2/scratchpad/docx_work/out.docx)",
+      "Bash(grep -rln \"Use \\\\`config\\\\` instead\" /Users/chakradhar/fastcoref_dashboard/.venv-1/lib/python3.9/site-packages/)",
+      "Bash(pip show *)"
     ]
   }
 }

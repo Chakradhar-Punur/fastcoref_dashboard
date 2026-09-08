@@ -370,7 +370,7 @@ def _model_comparison_tool():
                     xaxis_title="Run", yaxis_title=cmp_hist_metric, height=360,
                     template="plotly_dark" if st.get_option("theme.base") == "dark" else "plotly",
                 )
-                st.plotly_chart(cmp_hist_fig, width="stretch")
+                st.plotly_chart(cmp_hist_fig, use_container_width=True)
 
                 st.dataframe(
                     cmp_hist_df[[
@@ -1593,7 +1593,7 @@ else:
                     hovermode="x unified",
                     template="plotly_dark" if st.get_option("theme.base") == "dark" else "plotly",
                 )
-                st.plotly_chart(fig, width="stretch")
+                st.plotly_chart(fig, use_container_width=True)
 
         else:
             m1, m2, m3, m4 = st.columns(4)
