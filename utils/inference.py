@@ -8,7 +8,7 @@ from fastcoref import FCoref
 # it instead of the base model. None/"" = base model. This is the one line that
 # controls which model the whole app runs — active_model_label() below just
 # describes it for the UI, so the two can never drift out of sync.
-MODEL_NAME_OR_PATH = "/Users/Chakradhar/fastcoref_dashboard/finetune_runs/20260826-103415/model"
+MODEL_NAME_OR_PATH = "/Users/chakradhar/fastcoref_dashboard/finetune_runs/20260826-103415/model"
 
 
 def active_model_label() -> str:

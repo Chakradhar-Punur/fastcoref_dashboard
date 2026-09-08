@@ -183,10 +183,18 @@ def _model_comparison_tool():
                     cmp_id_error = True
 
             if not cmp_id_error:
+                # Both uploaders are required (see the button's `disabled=` above) before
+                # this branch can run — assert rather than re-check so Pylance knows
+                # they're no longer None.
+                assert cmp_pred_file is not None
                 cmp_pred_by_id = load_finetune_jsonl(cmp_pred_file.getvalue())
                 # Agreement mode has no separate gold file — the predicted-clusters file
                 # already carries "text" too, so it doubles as the source of abstract text.
-                cmp_gold_by_id = cmp_pred_by_id if cmp_agreement_mode else load_finetune_jsonl(cmp_gold_file.getvalue())
+                if cmp_agreement_mode:
+                    cmp_gold_by_id = cmp_pred_by_id
+                else:
+                    assert cmp_gold_file is not None
+                    cmp_gold_by_id = load_finetune_jsonl(cmp_gold_file.getvalue())
                 cmp_doc_ids = sorted(
                     i for i in (set(cmp_gold_by_id) & set(cmp_pred_by_id))
                     if i >= cmp_min_id and (cmp_max_id is None or i <= cmp_max_id)
@@ -649,6 +657,8 @@ if section == "Run inference":
 
         elif input_mode == "From CSV":
             replace_documents = False
+            # run_disabled above keeps this button unclickable while csv_df is None.
+            assert csv_df is not None
             start = st.session_state.csv_processed_count
             batch_df = csv_df.iloc[start:start + csv_batch_size]
             raw_docs = [
@@ -729,6 +739,7 @@ if section == "Run inference":
             "Session file", type=["json"], label_visibility="collapsed", key="session_file_uploader"
         )
         if st.button("Load session", icon=":material/upload_file:", disabled=session_file is None):
+            assert session_file is not None
             try:
                 snapshot = json.load(session_file)
                 load_session(snapshot)
@@ -955,6 +966,7 @@ else:
         gold_matches = {}
         flagged_by_cluster = {}
         if gold_data:
+            assert gold_entities is not None
             gold_matches = match_clusters_to_gold(clusters, gold_entities)
             missing_gold = find_missing_gold_entities(clusters, gold_entities)
             flagged_by_cluster = find_flagged_mentions_in_clusters(
